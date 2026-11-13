@@ -46,8 +46,15 @@ class UploadRouterHandler:
         if current_user.get("role") != "faculty":
             return 403, format_error("FORBIDDEN", "Only faculty can upload course modules.")
 
-        if not filename.endswith(".pptx"):
-            return 400, format_error("BAD_REQUEST", "Only .pptx files are supported.")
+        extension = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+        if extension not in {"pptx", "pdf"}:
+            return 400, format_error("BAD_REQUEST", "Only .pptx and .pdf files are supported.")
+
+        if extension == "pptx" and not file_bytes.startswith(b"PK"):
+            return 400, format_error("BAD_REQUEST", "That file is not a valid .pptx presentation.")
+
+        if extension == "pdf" and not file_bytes.lstrip().startswith(b"%PDF-"):
+            return 400, format_error("BAD_REQUEST", "That file is not a valid PDF document.")
 
         cos = []
         if self.cos_provider:
@@ -61,6 +68,7 @@ class UploadRouterHandler:
                 cos=cos,
                 tagger=self.tagger or (lambda chunks, cos: []),
                 store=self.store,
+                document_type=extension,
             )
             self.statuses[module_id] = {
                 "processing_status": report.status,
@@ -143,7 +151,7 @@ def _co_infos(conn, subject_id: str) -> list[COInfo]:
     return [COInfo(number=c["number"], description=c["description"] or "") for c in subject_cos(conn, subject_id)]
 
 
-def run_upload_pipeline(module_id: str, subject_id: str, data: bytes, user: dict) -> None:
+def run_upload_pipeline(module_id: str, subject_id: str, data: bytes, user: dict, document_type: str = "pptx") -> None:
     """Parse, save and tag one deck on its own connection (runs after the response is sent).
 
     A plain function with no request objects, so it can move to a Nebius Serverless Job.
@@ -161,6 +169,7 @@ def run_upload_pipeline(module_id: str, subject_id: str, data: bytes, user: dict
                     cos=_co_infos(conn, subject_id),
                     tagger=make_tagger(client, recorder),
                     store=store,
+                    document_type=document_type,
                 )
             finally:
                 if client is not None:
@@ -184,13 +193,16 @@ async def upload_module(
     subject_for_faculty(conn, str(module["subject_id"]), user)
 
     filename = (file.filename or "").strip()
-    if not filename.lower().endswith(".pptx"):
-        raise AppError(400, "BAD_REQUEST", "Only .pptx files are supported.")
+    extension = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+    if extension not in {"pptx", "pdf"}:
+        raise AppError(400, "BAD_REQUEST", "Only .pptx and .pdf files are supported.")
     data = await file.read(MAX_UPLOAD_BYTES + 1)
     if len(data) > MAX_UPLOAD_BYTES:
         raise AppError(400, "BAD_REQUEST", "File is larger than 25 MB.")
-    if not data.startswith(b"PK"):
+    if extension == "pptx" and not data.startswith(b"PK"):
         raise AppError(400, "BAD_REQUEST", "That file is not a valid .pptx presentation.")
+    if extension == "pdf" and not data.lstrip().startswith(b"%PDF-"):
+        raise AppError(400, "BAD_REQUEST", "That file is not a valid PDF document.")
     if module["processing_status"] == "processing":
         raise AppError(409, "CONFLICT", "This module is already being processed.")
 
@@ -201,7 +213,7 @@ async def upload_module(
     PostgresChunkStore(conn, str(module["subject_id"]), commit_status=True).set_module_status(
         str(module["id"]), "processing"
     )
-    background.add_task(run_upload_pipeline, str(module["id"]), str(module["subject_id"]), data, user)
+    background.add_task(run_upload_pipeline, str(module["id"]), str(module["subject_id"]), data, user, extension)
     return {"module_id": str(module["id"]), "processing_status": "processing"}
 
 
