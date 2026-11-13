@@ -36,7 +36,7 @@ def test_ai_connection(
                         "content": "Reply with exactly OK.",
                     }
                 ],
-                max_tokens=16,
+                max_tokens=512,
             )
 
         return {
