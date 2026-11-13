@@ -131,6 +131,16 @@ function Page() {
       toast.error("Add at least one question to the quiz.");
       return;
     }
+    if (
+      picked.length !== sel.length ||
+      picked.some((question) => question.status.toLowerCase() !== "approved")
+    ) {
+      toast.error(
+        "Only questions that are still approved can be published. Refresh the question bank and review your selection.",
+      );
+      queryClient.invalidateQueries({ queryKey: ["question-bank", activeSubject] });
+      return;
+    }
     publishMutation.mutate();
   };
 
@@ -163,7 +173,7 @@ function Page() {
   }
 
   return (
-      <Shell role="faculty" subjectLabel={detail ? `${detail.code} · ${detail.name}` : undefined}>
+    <Shell role="faculty" subjectLabel={detail ? `${detail.code} · ${detail.name}` : undefined}>
       <Toaster />
       <PageHead
         eyebrow="Teaching · Planner"
@@ -186,7 +196,12 @@ function Page() {
             <Btn
               size="lg"
               onClick={handlePublish}
-              disabled={publishMutation.isPending || sel.length === 0}
+              disabled={
+                publishMutation.isPending ||
+                sel.length === 0 ||
+                picked.length !== sel.length ||
+                picked.some((question) => question.status.toLowerCase() !== "approved")
+              }
             >
               <Send className="size-4" />
               {publishMutation.isPending ? "Publishing…" : "Publish quiz"}
@@ -194,9 +209,9 @@ function Page() {
           </div>
         }
       />
-      <div className="grid grid-cols-12 gap-5">
-        <Card className="col-span-12">
-          <div className="grid grid-cols-4 gap-4">
+      <div className="grid grid-cols-1 gap-5 lg:grid-cols-12">
+        <Card className="lg:col-span-12">
+          <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
             <Field label="Quiz title">
               <input
                 className={inputCls}
@@ -238,7 +253,7 @@ function Page() {
         </Card>
 
         <Card
-          className="col-span-6"
+          className="lg:col-span-6"
           title="Question bank"
           action={
             <span className="font-mono text-[11px] text-muted-foreground">approved only</span>
@@ -298,7 +313,7 @@ function Page() {
           )}
         </Card>
 
-        <div className="col-span-6 space-y-5">
+        <div className="space-y-5 lg:col-span-6">
           <div className="paper-wine p-5">
             <div className="flex items-end justify-between">
               <div>
@@ -354,13 +369,13 @@ function Page() {
           </Card>
         </div>
 
-        <Card className="col-span-12" title="Existing quizzes">
+        <Card className="lg:col-span-12" title="Existing quizzes">
           {!existingQuizzes?.length ? (
             <p className="py-6 text-center text-sm text-muted-foreground">
               No quizzes created yet.
             </p>
           ) : (
-            <div className="grid grid-cols-4 gap-4">
+            <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
               {existingQuizzes.map((q) => (
                 <div key={q.id} className="rounded-xl border border-wine/15 p-4">
                   <Chip s={q.published ? "Published" : "Draft"} />

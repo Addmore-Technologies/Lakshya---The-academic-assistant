@@ -258,3 +258,39 @@ class PostgresChunkRetrievalStore:
         for cid, mid, slide, body in rows:
             index.add_chunk(subject_id, str(cid), str(mid), int(slide), body)
         return index.search_chunks(subject_id, query, top_k=top_k)
+
+
+def module_chunks_detail(conn: Any, module_id: str) -> list[dict[str, Any]]:
+    """Return extracted slide text and every CO tag with its stored confidence."""
+    rows = conn.execute(
+        text(
+            "SELECT ch.id, ch.slide_number, ch.text, ch.tag_status, "
+            "co.number AS co_number, cc.confidence "
+            "FROM content_chunks ch "
+            "LEFT JOIN chunk_cos cc ON cc.chunk_id = ch.id "
+            "LEFT JOIN course_outcomes co ON co.id = cc.co_id "
+            "WHERE ch.module_id = :m "
+            "ORDER BY ch.slide_number, co.number"
+        ),
+        {"m": as_uuid(module_id, "Module")},
+    ).mappings().fetchall()
+    grouped: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        item = grouped.setdefault(
+            str(row["id"]),
+            {
+                "chunk_id": str(row["id"]),
+                "slide_number": int(row["slide_number"]),
+                "text": row["text"] or "",
+                "tag_status": row["tag_status"],
+                "course_outcomes": [],
+            },
+        )
+        if row["co_number"] is not None:
+            item["course_outcomes"].append(
+                {
+                    "co_number": int(row["co_number"]),
+                    "confidence": float(row["confidence"]) if row["confidence"] is not None else None,
+                }
+            )
+    return list(grouped.values())
