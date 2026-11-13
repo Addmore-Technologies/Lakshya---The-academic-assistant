@@ -124,12 +124,19 @@ def module_status(conn: Any, module_id: str) -> dict[str, Any] | None:
     tagged = int(row["tagged"])
     status = row["processing_status"]
 
+    diagnostic = str(row["processing_error"] or "")
+    tagging_error = diagnostic if status == "done" and diagnostic else None
+
     if status in ("pending", "processing"):
         tagging_status = "pending"
     elif status == "failed":
         tagging_status = "failed"
     elif total == 0:
         tagging_status = "no_content"
+    elif "AI_NOT_CONFIGURED" in diagnostic:
+        tagging_status = "ai_not_configured"
+    elif tagging_error:
+        tagging_status = "failed" if tagged == 0 else "partial"
     elif tagged == total:
         tagging_status = "completed"
     elif tagged > 0:
@@ -141,6 +148,7 @@ def module_status(conn: Any, module_id: str) -> dict[str, Any] | None:
         "processing_status": status,
         "extraction_status": "completed" if status == "done" else status,
         "tagging_status": tagging_status,
+        "tagging_error": tagging_error,
         "chunks_total": total,
         "chunks_tagged": tagged,
         "chunks_untagged": total - tagged,
@@ -250,3 +258,39 @@ class PostgresChunkRetrievalStore:
         for cid, mid, slide, body in rows:
             index.add_chunk(subject_id, str(cid), str(mid), int(slide), body)
         return index.search_chunks(subject_id, query, top_k=top_k)
+
+
+def module_chunks_detail(conn: Any, module_id: str) -> list[dict[str, Any]]:
+    """Return extracted slide text and every CO tag with its stored confidence."""
+    rows = conn.execute(
+        text(
+            "SELECT ch.id, ch.slide_number, ch.text, ch.tag_status, "
+            "co.number AS co_number, cc.confidence "
+            "FROM content_chunks ch "
+            "LEFT JOIN chunk_cos cc ON cc.chunk_id = ch.id "
+            "LEFT JOIN course_outcomes co ON co.id = cc.co_id "
+            "WHERE ch.module_id = :m "
+            "ORDER BY ch.slide_number, co.number"
+        ),
+        {"m": as_uuid(module_id, "Module")},
+    ).mappings().fetchall()
+    grouped: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        item = grouped.setdefault(
+            str(row["id"]),
+            {
+                "chunk_id": str(row["id"]),
+                "slide_number": int(row["slide_number"]),
+                "text": row["text"] or "",
+                "tag_status": row["tag_status"],
+                "course_outcomes": [],
+            },
+        )
+        if row["co_number"] is not None:
+            item["course_outcomes"].append(
+                {
+                    "co_number": int(row["co_number"]),
+                    "confidence": float(row["confidence"]) if row["confidence"] is not None else None,
+                }
+            )
+    return list(grouped.values())

@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute } from "@tanstack/react-router";
 import { AlertTriangle, FileText, UploadCloud } from "lucide-react";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { Toaster } from "@/components/ui/sonner";
 import { Shell } from "@/components/lk/Shell";
@@ -9,7 +9,14 @@ import { Bar, Btn, Card, Chip, CO, Field, inputCls, PageHead } from "@/component
 import { cn } from "@/lib/utils";
 import { ApiError, modules, roster, subjects, upload } from "@/lib/api";
 import { getStoredSubjectId, storeSubjectId } from "@/lib/subject-context";
-import type { CoverageItem, ModuleStatus, ModuleSummary, RosterConfirm, RosterPreview, SubjectDetail } from "@/lib/api";
+import type {
+  CoverageItem,
+  ModuleStatus,
+  ModuleSummary,
+  RosterConfirm,
+  RosterPreview,
+  SubjectDetail,
+} from "@/lib/api";
 
 export const Route = createFileRoute("/faculty/upload")({
   head: () => ({
@@ -33,6 +40,15 @@ function Page() {
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [newModNumber, setNewModNumber] = useState("5");
   const [newModTitle, setNewModTitle] = useState("Query Optimisation");
+  const [coDrafts, setCoDrafts] = useState(
+    Array.from({ length: 6 }, (_, index) => ({
+      number: index + 1,
+      description: "",
+      threshold_pct: 60,
+      target_attainment_pct: 60,
+    })),
+  );
+  const [coValidation, setCoValidation] = useState<string | null>(null);
 
   // Roster upload
   const [rosterFile, setRosterFile] = useState<File | null>(null);
@@ -53,19 +69,100 @@ function Page() {
     enabled: !!activeSubject,
   });
 
+  const subjectCOs = detail?.cos;
+
+  useEffect(() => {
+    if (!subjectCOs) return;
+
+    setCoDrafts(
+      Array.from({ length: 6 }, (_, index) => {
+        const existing = subjectCOs.find((co) => co.number === index + 1);
+        return {
+          number: index + 1,
+          description: existing?.description ?? "",
+          threshold_pct: existing?.threshold_pct ?? 60,
+          target_attainment_pct: existing?.target_attainment_pct ?? 60,
+        };
+      }),
+    );
+    setCoValidation(null);
+  }, [subjectCOs]);
+
   const { data: coverage } = useQuery<CoverageItem[]>({
     queryKey: ["coverage", activeSubject],
     queryFn: () => upload.getCoverage(activeSubject!),
     enabled: !!activeSubject,
   });
 
-  const { data: moduleStatus, refetch: refetchStatus } = useQuery<ModuleStatus>({
+  const coSaveMutation = useMutation({
+    mutationFn: () =>
+      subjects.upsertCOs(activeSubject!, {
+        cos: coDrafts.map((co) => ({
+          number: co.number,
+          description: co.description.trim(),
+          threshold_pct: co.threshold_pct,
+          target_attainment_pct: co.target_attainment_pct,
+        })),
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["subject-detail", activeSubject] });
+      queryClient.invalidateQueries({ queryKey: ["coverage", activeSubject] });
+      toast.success("Course outcomes saved for this subject.");
+      setCoValidation(null);
+    },
+    onError: (e) => {
+      if (e instanceof ApiError) setCoValidation(e.message);
+      else setCoValidation("Could not save course outcomes. Please try again.");
+    },
+  });
+
+  const saveCOs = () => {
+    const missing = coDrafts.filter((co) => !co.description.trim()).map((co) => co.number);
+    if (missing.length) {
+      setCoValidation(
+        `Add a description for ${missing.map((n) => `CO${n}`).join(", ")} before saving.`,
+      );
+      return;
+    }
+    const numbers = coDrafts.map((co) => co.number);
+    if (new Set(numbers).size !== numbers.length) {
+      setCoValidation("Each CO number must be unique (CO1–CO6).");
+      return;
+    }
+    const invalidTarget = coDrafts.find(
+      (co) =>
+        co.threshold_pct < 0 ||
+        co.threshold_pct > 100 ||
+        co.target_attainment_pct < 0 ||
+        co.target_attainment_pct > 100,
+    );
+    if (invalidTarget) {
+      setCoValidation("Threshold and target values must be between 0 and 100.");
+      return;
+    }
+    coSaveMutation.mutate();
+  };
+
+  const { data: moduleStatus } = useQuery<ModuleStatus>({
     queryKey: ["module-status", selectedModule],
     queryFn: () => upload.getModuleStatus(selectedModule!),
     enabled: !!selectedModule,
     refetchInterval: (query) =>
-      query.state.data?.processing_status === "processing" ? 5000 : false,
+      ["pending", "processing"].includes(query.state.data?.processing_status ?? "") ? 5000 : false,
   });
+
+  const { data: moduleChunks } = useQuery({
+    queryKey: ["module-chunks", selectedModule],
+    queryFn: () => upload.getModuleChunks(selectedModule!),
+    enabled: !!selectedModule && moduleStatus?.processing_status === "done",
+  });
+
+  useEffect(() => {
+    if (moduleStatus?.processing_status === "done") {
+      queryClient.invalidateQueries({ queryKey: ["coverage", activeSubject] });
+      queryClient.invalidateQueries({ queryKey: ["subject-detail", activeSubject] });
+    }
+  }, [moduleStatus?.processing_status, activeSubject, queryClient]);
 
   const createMutation = useMutation({
     mutationFn: (body: { number: number; title: string }) => modules.create(activeSubject!, body),
@@ -86,7 +183,7 @@ function Page() {
     onSuccess: (res) => {
       queryClient.invalidateQueries({ queryKey: ["module-status", res.module_id] });
       setIsUploading(false);
-      toast.success("Slides uploaded — processing in background.");
+      toast.success("Upload accepted. Processing status will update below.");
     },
     onError: (e) => {
       setIsUploading(false);
@@ -97,11 +194,21 @@ function Page() {
 
   const handleUpload = async () => {
     if (!selectedFile) {
-      toast.error("Please select a .pptx file first.");
+      toast.error("Please select a PowerPoint or PDF file first.");
+      return;
+    }
+    if (selectedFile.name.toLowerCase().endsWith(".pdf")) {
+      setUploadError(
+        "PDF is shown as an accepted workflow format, but the current backend endpoint only accepts .pptx. Ask Aparna to enable PDF parsing before uploading PDFs.",
+      );
       return;
     }
     if (!selectedFile.name.toLowerCase().endsWith(".pptx")) {
-      toast.error("Only .pptx files are supported.");
+      toast.error("Choose a .pptx or .pdf file.");
+      return;
+    }
+    if (selectedFile.size > 25 * 1024 * 1024) {
+      setUploadError("File is larger than the 25 MB limit.");
       return;
     }
 
@@ -214,10 +321,154 @@ function Page() {
           </select>
         }
       />
-      <div className="grid grid-cols-12 gap-5">
+      <div className="grid grid-cols-1 gap-5 lg:grid-cols-12">
+        <Card className="lg:col-span-12" title="Subject course outcomes">
+          <p className="mb-4 text-sm text-muted-foreground">
+            Define CO1–CO6 once for this subject. Module uploads reuse these descriptions
+            automatically; there is no CO picker during upload.
+          </p>
+          {detail?.cos && (
+            <div className="mb-3 rounded-lg bg-beige/60 p-3 text-xs text-muted-foreground">
+              {(() => {
+                const savedNumbers = detail.cos.map((co) => co.number);
+                const missing = [1, 2, 3, 4, 5, 6].filter(
+                  (number) => !savedNumbers.includes(number),
+                );
+                const duplicates = [
+                  ...new Set(
+                    savedNumbers.filter((number, index) => savedNumbers.indexOf(number) !== index),
+                  ),
+                ];
+                return (
+                  <>
+                    {missing.length > 0 && (
+                      <p>
+                        Missing saved outcomes: {missing.map((number) => `CO${number}`).join(", ")}.
+                      </p>
+                    )}
+                    {duplicates.length > 0 && (
+                      <p className="text-wine">
+                        Duplicate saved CO numbers:{" "}
+                        {duplicates.map((number) => `CO${number}`).join(", ")}. Correct these before
+                        continuing.
+                      </p>
+                    )}
+                    {missing.length === 0 && duplicates.length === 0 && (
+                      <p>All six CO numbers are present.</p>
+                    )}
+                  </>
+                );
+              })()}
+            </div>
+          )}
+          <div className="space-y-3">
+            {coDrafts.map((co, index) => (
+              <div
+                key={co.number}
+                className="grid grid-cols-1 gap-3 rounded-xl border border-wine/10 p-3 md:grid-cols-12"
+              >
+                <div className="flex items-center md:col-span-1">
+                  <CO n={co.number} />
+                </div>
+                <div className="md:col-span-7">
+                  <label
+                    className="mb-1 block text-xs font-semibold text-muted-foreground"
+                    htmlFor={`co-description-${co.number}`}
+                  >
+                    Description
+                  </label>
+                  <textarea
+                    id={`co-description-${co.number}`}
+                    className={cn(inputCls, "min-h-16 w-full resize-y")}
+                    value={co.description}
+                    onChange={(e) =>
+                      setCoDrafts((current) =>
+                        current.map((item, i) =>
+                          i === index ? { ...item, description: e.target.value } : item,
+                        ),
+                      )
+                    }
+                    placeholder={`Describe what students should achieve for CO${co.number}`}
+                  />
+                </div>
+                <div className="md:col-span-2">
+                  <label
+                    className="mb-1 block text-xs font-semibold text-muted-foreground"
+                    htmlFor={`co-threshold-${co.number}`}
+                  >
+                    Threshold %
+                  </label>
+                  <input
+                    id={`co-threshold-${co.number}`}
+                    type="number"
+                    min="0"
+                    max="100"
+                    className={cn(inputCls, "w-full")}
+                    value={co.threshold_pct}
+                    onChange={(e) =>
+                      setCoDrafts((current) =>
+                        current.map((item, i) =>
+                          i === index ? { ...item, threshold_pct: Number(e.target.value) } : item,
+                        ),
+                      )
+                    }
+                  />
+                </div>
+                <div className="md:col-span-2">
+                  <label
+                    className="mb-1 block text-xs font-semibold text-muted-foreground"
+                    htmlFor={`co-target-${co.number}`}
+                  >
+                    Target attainment %
+                  </label>
+                  <input
+                    id={`co-target-${co.number}`}
+                    type="number"
+                    min="0"
+                    max="100"
+                    className={cn(inputCls, "w-full")}
+                    value={co.target_attainment_pct}
+                    onChange={(e) =>
+                      setCoDrafts((current) =>
+                        current.map((item, i) =>
+                          i === index
+                            ? { ...item, target_attainment_pct: Number(e.target.value) }
+                            : item,
+                        ),
+                      )
+                    }
+                  />
+                </div>
+              </div>
+            ))}
+          </div>
+          {coValidation && (
+            <p role="alert" className="mt-3 rounded-lg bg-wine/10 p-3 text-sm text-wine">
+              {coValidation}
+            </p>
+          )}
+          <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
+            <span className="text-xs text-muted-foreground">
+              {detail?.cos?.length ?? 0} of 6 outcomes currently saved
+            </span>
+            <Btn onClick={saveCOs} disabled={coSaveMutation.isPending || !activeSubject}>
+              {coSaveMutation.isPending ? "Saving outcomes…" : "Save CO descriptions"}
+            </Btn>
+          </div>
+        </Card>
+
         {/* Upload form */}
-        <Card className="col-span-7">
+        <Card className="lg:col-span-7">
           <div className="space-y-4">
+            {detail && detail.cos.length === 0 && (
+              <div
+                role="status"
+                className="rounded-xl border border-warn/40 bg-warn/10 p-3 text-sm"
+              >
+                No course outcomes are saved for this subject yet. Add CO1–CO6 above before
+                uploading if you want automatic tagging.
+              </div>
+            )}
             <Field label="Module">
               <select
                 value={selectedModule ?? ""}
@@ -239,7 +490,7 @@ function Page() {
 
             {!selectedModule && (
               <>
-                <div className="grid grid-cols-3 gap-4">
+                <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
                   <Field label="Module no.">
                     <input
                       type="number"
@@ -248,7 +499,7 @@ function Page() {
                       onChange={(e) => setNewModNumber(e.target.value)}
                     />
                   </Field>
-                  <div className="col-span-2">
+                  <div className="sm:col-span-2">
                     <Field label="Module title">
                       <input
                         className={inputCls}
@@ -269,7 +520,7 @@ function Page() {
             >
               <input
                 type="file"
-                accept=".pptx"
+                accept=".pptx,.pdf"
                 ref={fileInputRef}
                 className="hidden"
                 onChange={(e) => setSelectedFile(e.target.files?.[0] ?? null)}
@@ -279,7 +530,7 @@ function Page() {
                 {selectedFile?.name || "Drop your PPT here"}
               </div>
               <div className="text-sm text-muted-foreground">
-                or click to browse · .pptx up to 25 MB
+                or click to browse · .pptx / .pdf · up to 25 MB
               </div>
             </div>
           </div>
@@ -333,7 +584,7 @@ function Page() {
         </Card>
 
         {/* CO coverage */}
-        <Card className="col-span-5" title="CO coverage">
+        <Card className="lg:col-span-5" title="CO coverage">
           {!coverage?.length ? (
             <p className="py-8 text-center text-sm text-muted-foreground">
               Upload a module to see CO coverage.
@@ -346,7 +597,9 @@ function Page() {
                   <div className="flex-1">
                     <Bar v={Math.max(c.chunk_count * 5, 1)} tone={c.warning ? "wine" : "blue"} />
                   </div>
-                  <span className="w-16 text-right font-mono text-xs">{c.chunk_count} chunks</span>
+                  <span className="w-20 text-right font-mono text-xs">
+                    {c.chunk_count === 0 ? "No evidence" : `${c.chunk_count} chunks`}
+                  </span>
                 </div>
               ))}
               {coverage.some((c) => c.warning) && (
@@ -363,7 +616,7 @@ function Page() {
         </Card>
 
         {/* Modules list */}
-        <Card className="col-span-5" title="Modules">
+        <Card className="lg:col-span-5" title="Modules">
           {!detail?.modules?.length ? (
             <p className="py-6 text-center text-sm text-muted-foreground">
               No modules yet. Create one above.
@@ -392,7 +645,7 @@ function Page() {
         </Card>
 
         {/* Module processing status */}
-        <Card className="col-span-7" title="Module status">
+        <Card className="lg:col-span-7" title="Module status">
           {!selectedModule ? (
             <p className="py-6 text-center text-sm text-muted-foreground">
               Select a module to view its processing status.
@@ -429,6 +682,33 @@ function Page() {
                   }
                 />
               </div>
+              {moduleStatus.tagging_status && (
+                <div className="mb-3 rounded-lg bg-beige/60 p-3 text-sm">
+                  <div className="font-semibold text-espresso">
+                    CO tagging: {moduleStatus.tagging_status.replaceAll("_", " ")}
+                  </div>
+                  {moduleStatus.tagging_status === "ai_not_configured" && (
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      The slide text was processed, but AI tagging is not configured. Contact the
+                      backend owner to enable it.
+                    </p>
+                  )}
+                  {moduleStatus.tagging_error && (
+                    <p className="mt-1 text-xs text-wine">{moduleStatus.tagging_error}</p>
+                  )}
+                  {moduleStatus.tagging_status === "unmapped" && (
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      No slide chunks were matched to a CO. Review the extracted slide evidence
+                      below.
+                    </p>
+                  )}
+                  {moduleStatus.tagging_status === "partial" && (
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      Some slide chunks were tagged; the rest remain available for review.
+                    </p>
+                  )}
+                </div>
+              )}
               <div className="mb-2 flex justify-between text-sm">
                 <span>Total chunks</span>
                 <span className="font-mono">{moduleStatus.chunks_total}</span>
@@ -472,7 +752,9 @@ function Page() {
                           moduleId: selectedModule,
                           formData,
                         });
-                        queryClient.invalidateQueries({ queryKey: ["subject-detail", activeSubject] });
+                        queryClient.invalidateQueries({
+                          queryKey: ["subject-detail", activeSubject],
+                        });
                         toast.success("Retry upload started.");
                       } catch (e) {
                         if (e instanceof ApiError) toast.error(e.message);
@@ -494,13 +776,61 @@ function Page() {
           )}
         </Card>
 
+        <Card className="lg:col-span-12" title="Slide-by-slide CO evidence">
+          {!selectedModule || moduleStatus?.processing_status !== "done" ? (
+            <p className="py-5 text-sm text-muted-foreground">
+              Select a completed module to inspect extracted slide text and CO tags.
+            </p>
+          ) : !moduleChunks?.length ? (
+            <p className="py-5 text-sm text-muted-foreground">
+              No extractable slide text was returned for this module.
+            </p>
+          ) : (
+            <div className="space-y-3">
+              {moduleChunks.map((chunk) => (
+                <article key={chunk.chunk_id} className="rounded-xl border border-wine/10 p-4">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="font-mono text-xs font-semibold text-wine">
+                      Slide {chunk.slide_number}
+                    </span>
+                    {chunk.course_outcomes.length ? (
+                      chunk.course_outcomes.map((co) => (
+                        <span
+                          key={co.co_number}
+                          className="rounded-full bg-dusty/40 px-2 py-1 text-xs text-oxblood"
+                        >
+                          CO{co.co_number} · AI inferred
+                          {co.confidence !== null
+                            ? ` · ${(co.confidence * 100).toFixed(0)}% confidence`
+                            : ""}
+                        </span>
+                      ))
+                    ) : (
+                      <span className="rounded-full bg-beige px-2 py-1 text-xs text-muted-foreground">
+                        Unmatched · needs review
+                      </span>
+                    )}
+                  </div>
+                  <p className="mt-2 whitespace-pre-wrap text-sm text-espresso">{chunk.text}</p>
+                </article>
+              ))}
+            </div>
+          )}
+          <p className="mt-3 text-xs text-muted-foreground">
+            The current data model stores AI tag confidence but does not record whether a tag came
+            from an explicit label in the source. Confidence is a match score, not attainment.
+            Incorrect-tag correction is not enabled because the backend correction endpoint has not
+            yet been provided.
+          </p>
+        </Card>
+
         {/* Roster upload */}
-        <Card className="col-span-12" title="Roster upload">
+        <Card className="lg:col-span-12" title="Roster upload">
           {!rosterPreview && !rosterResult ? (
             <div>
               <p className="text-sm text-muted-foreground">
-                Upload a CSV roster to enrol students. The file is previewed before
-                any changes are applied.
+                Upload a CSV roster to enrol students. The file is previewed before any changes are
+                applied.
               </p>
               <div className="mt-4 flex items-center gap-3">
                 <input
@@ -524,7 +854,10 @@ function Page() {
               confirming={rosterConfirming}
             />
           ) : rosterResult ? (
-            <RosterResultView result={rosterResult} subjectName={detail?.name ?? activeSubject ?? ""} />
+            <RosterResultView
+              result={rosterResult}
+              subjectName={detail?.name ?? activeSubject ?? ""}
+            />
           ) : null}
         </Card>
       </div>
@@ -543,7 +876,7 @@ function RosterPreviewView({
 }) {
   return (
     <div className="space-y-4">
-      <div className="grid grid-cols-4 gap-4 text-center">
+      <div className="grid grid-cols-2 gap-4 text-center md:grid-cols-4">
         <div className="paper p-3">
           <div className="text-2xl font-bold text-wine">{preview.total_rows}</div>
           <div className="eyebrow">Total rows</div>

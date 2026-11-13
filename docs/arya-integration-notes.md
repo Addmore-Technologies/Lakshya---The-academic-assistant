@@ -61,3 +61,11 @@ Token Factory call, the frontend, concurrent use. Do not describe database integ
 3. Faculty: should a student's study plan include COs they have not been assessed on yet?
 4. Faculty: Excel format. The export is a simple USN, name, section, CO%, total sheet plus a class summary sheet.
 5. Whether to run the seed on the shared Supabase database, and when. It adds a subject, 60 students and one faculty login; `--remove` deletes exactly those rows.
+
+
+## Faculty workflow UI integration (Arya)
+- Faculty upload now includes a subject-level CO1–CO6 editor backed by `PUT /subjects/{id}/cos`.
+- The module evidence view uses `GET /modules/{id}/chunks`, added to return slide number, extracted text, all linked CO numbers, and stored confidence values.
+- The existing upload backend still accepts `.pptx` only (25 MB). The UI accepts a PDF selection but blocks submission with a clear backend-contract message until PDF parsing is enabled.
+- The current schema does not store explicit-label-vs-AI tag provenance, nor does it expose a tag-correction endpoint. The UI labels current tags as AI-inferred and does not claim explicit-label provenance.
+- Question editing uses the existing authenticated `PATCH /questions/{id}` route. The API does not currently expose a regenerate endpoint or question-to-slide source citation; regeneration remains disabled and source-location absence is disclosed in the review UI.
