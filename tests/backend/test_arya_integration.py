@@ -277,7 +277,7 @@ def test_upload_pending_to_done_without_ai(client, ctx, db):
     assert st["chunks_total"] == 3
     # No AI: chunks are kept, untagged, and the upload still succeeds.
     assert st["chunks_tagged"] == 0 and st["chunks_untagged"] == 3
-    assert st["error"] is None
+    assert "AI_NOT_CONFIGURED" in st["error"]
     cov = client.get(f"/subjects/{w.sid}/coverage", headers=w.fh).json()
     assert [c["chunk_count"] for c in cov] == [0, 0] and all(c["warning"] for c in cov)
 
