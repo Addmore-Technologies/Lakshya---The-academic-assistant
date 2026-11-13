@@ -110,20 +110,43 @@ def module_status(conn: Any, module_id: str) -> dict[str, Any] | None:
         text(
             "SELECT m.processing_status, m.processing_error, "
             "  (SELECT count(*) FROM content_chunks c WHERE c.module_id = m.id) AS total, "
-            "  (SELECT count(*) FROM content_chunks c WHERE c.module_id = m.id AND c.tag_status = 'tagged') AS tagged "
+            "  (SELECT count(*) FROM content_chunks c WHERE c.module_id = m.id "
+            "   AND c.tag_status = 'tagged') AS tagged "
             "FROM modules m WHERE m.id = :id"
         ),
         {"id": mid},
     ).mappings().fetchone()
+
     if row is None:
         return None
+
+    total = int(row["total"])
+    tagged = int(row["tagged"])
+    status = row["processing_status"]
+
+    if status in ("pending", "processing"):
+        tagging_status = "pending"
+    elif status == "failed":
+        tagging_status = "failed"
+    elif total == 0:
+        tagging_status = "no_content"
+    elif tagged == total:
+        tagging_status = "completed"
+    elif tagged > 0:
+        tagging_status = "partial"
+    else:
+        tagging_status = "unmapped"
+
     return {
-        "processing_status": row["processing_status"],
-        "chunks_total": int(row["total"]),
-        "chunks_tagged": int(row["tagged"]),
-        "chunks_untagged": int(row["total"]) - int(row["tagged"]),
+        "processing_status": status,
+        "extraction_status": "completed" if status == "done" else status,
+        "tagging_status": tagging_status,
+        "chunks_total": total,
+        "chunks_tagged": tagged,
+        "chunks_untagged": total - tagged,
         "error": row["processing_error"],
     }
+
 
 
 def subject_cos(conn: Any, subject_id: str) -> list[dict[str, Any]]:
