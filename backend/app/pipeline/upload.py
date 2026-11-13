@@ -178,7 +178,9 @@ def process_module_upload(
         store.set_module_status(module_id, STATUS_FAILED, f"Upload failed: {exc}")
         raise
 
-    store.set_module_status(module_id, STATUS_DONE)
+    # Preserve tagging errors without marking successful extraction as failed.
+    tagging_error = "; ".join(errors)[:500] if errors else None
+    store.set_module_status(module_id, STATUS_DONE, tagging_error)
     return UploadReport(
         module_id=module_id,
         status=STATUS_DONE,

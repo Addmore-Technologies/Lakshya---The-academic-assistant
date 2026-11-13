@@ -143,7 +143,13 @@ def make_tagger(client: Any | None, recorder: UsageRecorder):
     model = model_for("tagging")
     if client is None or not model:
         log.warning("Token Factory not configured: chunks will be saved untagged")
-        return lambda chunks, cos: []
+
+        def unavailable_tagger(chunks, cos):
+            raise RuntimeError(
+                "AI_NOT_CONFIGURED: Token Factory credentials or tagging model are missing"
+            )
+
+        return unavailable_tagger
 
     from ai.tagging import tag_content_with_COs
 

@@ -124,12 +124,19 @@ def module_status(conn: Any, module_id: str) -> dict[str, Any] | None:
     tagged = int(row["tagged"])
     status = row["processing_status"]
 
+    diagnostic = str(row["processing_error"] or "")
+    tagging_error = diagnostic if status == "done" and diagnostic else None
+
     if status in ("pending", "processing"):
         tagging_status = "pending"
     elif status == "failed":
         tagging_status = "failed"
     elif total == 0:
         tagging_status = "no_content"
+    elif "AI_NOT_CONFIGURED" in diagnostic:
+        tagging_status = "ai_not_configured"
+    elif tagging_error:
+        tagging_status = "failed" if tagged == 0 else "partial"
     elif tagged == total:
         tagging_status = "completed"
     elif tagged > 0:
@@ -141,6 +148,7 @@ def module_status(conn: Any, module_id: str) -> dict[str, Any] | None:
         "processing_status": status,
         "extraction_status": "completed" if status == "done" else status,
         "tagging_status": tagging_status,
+        "tagging_error": tagging_error,
         "chunks_total": total,
         "chunks_tagged": tagged,
         "chunks_untagged": total - tagged,
