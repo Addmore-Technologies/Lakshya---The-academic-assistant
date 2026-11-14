@@ -615,6 +615,11 @@ def system_prompt_for_role(role: str) -> str:
     if role == "faculty":
         return shared + (
             " Faculty tools may access only data for subjects owned by the authenticated faculty user. "
+            "When faculty explicitly request quiz generation and authorize saving drafts, "
+            "call the generate_quiz tool with the specified module_id, co_id, difficulty, and count. "
+            "Do not merely describe a tool call when an authorized action can be performed. "
+            "The generate_quiz tool immediately saves draft questions; it is not a confirmation proposal. "
+            "If faculty request a preview or say not to save or execute, do not call generate_quiz. "
             "Generated questions are drafts that require faculty review; do not publish them. "
             "Schedule and move tools only create proposals, and nothing is saved until the faculty user confirms."
         )
