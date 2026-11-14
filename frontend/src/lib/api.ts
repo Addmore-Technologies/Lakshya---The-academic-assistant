@@ -432,12 +432,14 @@ export interface ModuleStatus {
 }
 
 export interface ModuleChunk {
-  chunk_id: string;
+  id: string;
   slide_number: number;
   text: string;
-  co_id: string | null;
-  co_number: number | null;
-  confidence: number | null;
+  tag_status: string;
+  course_outcomes: {
+    co_number: number;
+    confidence: number | null;
+  }[];
 }
 
 export interface CoverageItem {

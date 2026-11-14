@@ -11,6 +11,7 @@ import { ApiError, modules, roster, subjects, upload } from "@/lib/api";
 import { getStoredSubjectId, storeSubjectId } from "@/lib/subject-context";
 import type {
   CoverageItem,
+  ModuleChunk,
   ModuleStatus,
   ModuleSummary,
   RosterConfirm,
@@ -87,7 +88,7 @@ function Page() {
     if (moduleStatus?.processing_status === "failed") {
       queryClient.invalidateQueries({ queryKey: ["subject-detail", activeSubject] });
     }
-  }, [moduleStatus?.processing_status, activeSubject, queryClient]);
+  }, [moduleStatus?.processing_status, activeSubject, selectedModule, queryClient]);
 
   const {
     data: moduleChunks,

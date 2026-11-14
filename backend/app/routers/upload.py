@@ -127,7 +127,7 @@ from fastapi import BackgroundTasks
 from ..db import get_conn, get_engine
 from ..deps import require_faculty
 from ..errors import AppError
-from ..pg.chunks import PostgresChunkStore, chunk_co_links, module_status, module_chunks_with_co, subject_cos
+from ..pg.chunks import PostgresChunkStore, chunk_co_links, module_status, module_chunks_detail, subject_cos
 from ..pg.common import module_for_user, subject_for_faculty
 from ..pg.usage import PostgresUsageStore  # noqa: F401  (kept for symmetry with other routers)
 from ..services.ai_glue import UsageRecorder, get_client, make_tagger
@@ -210,7 +210,7 @@ def get_module_chunks(module_id: str, conn=Depends(get_conn), user=Depends(requi
     """Return extracted slide text and the best-confidence CO tag for faculty review."""
     module = module_for_user(conn, module_id, user)
     subject_for_faculty(conn, str(module["subject_id"]), user)
-    return module_chunks_with_co(conn, str(module["id"]))
+    return module_chunks_detail(conn, str(module["id"]))
 
 
 @router.get("/modules/{module_id}/status")

@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from typing import BinaryIO, Callable, Iterable, Mapping, Protocol, Sequence
 
 from .ppt import PptParseError, SlideChunk, parse_pptx
+from .pdf import parse_pdf
 
 STATUS_PROCESSING = "processing"
 STATUS_DONE = "done"
@@ -124,6 +125,7 @@ def process_module_upload(
     *,
     batch_size: int = DEFAULT_BATCH_SIZE,
     include_notes: bool = True,
+    document_type: str = "pptx",
 ) -> UploadReport:
     """Parse the deck, save its chunks, tag them, and report what happened."""
     if batch_size < 1:
@@ -136,7 +138,12 @@ def process_module_upload(
         return UploadReport(module_id, STATUS_FAILED, message, total_slides, 0, 0, 0, skipped, ())
 
     try:
-        deck = parse_pptx(source, include_notes=include_notes)
+        if document_type.lower() == "pdf":
+            deck = parse_pdf(source)
+        elif document_type.lower() == "pptx":
+            deck = parse_pptx(source, include_notes=include_notes)
+        else:
+            return failed("Unsupported file type. Upload a .pptx or .pdf file.")
     except PptParseError as exc:
         return failed(str(exc))
     if not deck.chunks:
@@ -178,7 +185,9 @@ def process_module_upload(
         store.set_module_status(module_id, STATUS_FAILED, f"Upload failed: {exc}")
         raise
 
-    store.set_module_status(module_id, STATUS_DONE)
+    # Preserve tagging errors without marking successful extraction as failed.
+    tagging_error = "; ".join(errors)[:500] if errors else None
+    store.set_module_status(module_id, STATUS_DONE, tagging_error)
     return UploadReport(
         module_id=module_id,
         status=STATUS_DONE,
