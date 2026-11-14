@@ -307,16 +307,48 @@ def test_export_sheet_student_forbidden():
     assert exc.value.status_code == 403
 
 
+
+@pytest.fixture
+def tagged_slide(db):
+    """Create a CO-tagged slide for quiz-generation tests."""
+    def create(module_id, co_id):
+        chunk_id = db.execute(
+            text(
+                "INSERT INTO content_chunks "
+                "(module_id, slide_number, text, tag_status) "
+                "VALUES (:mid, 1, :content, 'tagged') "
+                "RETURNING id"
+            ),
+            {
+                "mid": module_id,
+                "content": (
+                    "A stack follows Last In First Out (LIFO). "
+                    "Push inserts an element and pop removes the top element."
+                ),
+            },
+        ).scalar_one()
+
+        db.execute(
+            text(
+                "INSERT INTO chunk_cos (chunk_id, co_id, confidence) "
+                "VALUES (:chunk_id, :co_id, 0.99)"
+            ),
+            {"chunk_id": chunk_id, "co_id": co_id},
+        )
+    return create
+
+
 # ---------------------------------------------------------------------------
 # generate_quiz
 # ---------------------------------------------------------------------------
 
-def test_generate_quiz_faculty_creates_drafts(db, ctx, fake_ai):
+def test_generate_quiz_faculty_creates_drafts(db, ctx, fake_ai, tagged_slide):
     """Faculty can generate quiz questions; they are saved as drafts."""
     faculty = ctx.make_faculty()
     subj = ctx.make_subject(faculty["user_id"])
     co = ctx.make_co(subj["subject_id"], 1, "CO1")
     mod = ctx.make_module(subj["subject_id"], 1, "Module 1")
+    tagged_slide(mod["module_id"], co["co_id"])
 
     user = {"user_id": faculty["user_id"], "role": "faculty"}
     args = GenerateQuizArgs(module_id=mod["module_id"], co_id=co["co_id"],
@@ -384,12 +416,13 @@ def test_generate_quiz_module_not_owned(db, ctx, fake_ai):
     assert exc.value.status_code == 404
 
 
-def test_generate_quiz_saves_question_with_correct_fields(db, ctx, fake_ai):
+def test_generate_quiz_saves_question_with_correct_fields(db, ctx, fake_ai, tagged_slide):
     """Generated questions have all expected fields set."""
     faculty = ctx.make_faculty()
     subj = ctx.make_subject(faculty["user_id"])
     co = ctx.make_co(subj["subject_id"], 1, "CO1")
     mod = ctx.make_module(subj["subject_id"], 1, "Module 1")
+    tagged_slide(mod["module_id"], co["co_id"])
 
     user = {"user_id": faculty["user_id"], "role": "faculty"}
     args = GenerateQuizArgs(module_id=mod["module_id"], co_id=co["co_id"],
@@ -414,12 +447,13 @@ def test_generate_quiz_saves_question_with_correct_fields(db, ctx, fake_ai):
         assert isinstance(opts, (list, dict)) or hasattr(opts, "__iter__")
 
 
-def test_generate_quiz_status_always_draft(db, ctx, monkeypatch):
+def test_generate_quiz_status_always_draft(db, ctx, monkeypatch, tagged_slide):
     """Even if the AI function returns status='approved', the DB row is draft."""
     faculty = ctx.make_faculty()
     subj = ctx.make_subject(faculty["user_id"])
     co = ctx.make_co(subj["subject_id"], 1, "CO1")
     mod = ctx.make_module(subj["subject_id"], 1, "Module 1")
+    tagged_slide(mod["module_id"], co["co_id"])
 
     # Set env vars
     monkeypatch.setenv("TOKEN_FACTORY_API_KEY", "test-key")
@@ -467,12 +501,13 @@ def test_generate_quiz_status_always_draft(db, ctx, monkeypatch):
         assert row["source"] == "AI"
 
 
-def test_generate_quiz_quiz_generation_error(db, ctx, fake_ai_failure):
+def test_generate_quiz_quiz_generation_error(db, ctx, fake_ai_failure, tagged_slide):
     """QuizGenerationError from the AI function is mapped to a clean AppError."""
     faculty = ctx.make_faculty()
     subj = ctx.make_subject(faculty["user_id"])
     co = ctx.make_co(subj["subject_id"], 1, "CO1")
     mod = ctx.make_module(subj["subject_id"], 1, "Module 1")
+    tagged_slide(mod["module_id"], co["co_id"])
 
     user = {"user_id": faculty["user_id"], "role": "faculty"}
     args = GenerateQuizArgs(module_id=mod["module_id"], co_id=co["co_id"], count=2)
@@ -481,12 +516,13 @@ def test_generate_quiz_quiz_generation_error(db, ctx, fake_ai_failure):
     assert exc.value.status_code in (500, 502)
 
 
-def test_generate_quiz_missing_env_var(db, ctx, monkeypatch):
+def test_generate_quiz_missing_env_var(db, ctx, monkeypatch, tagged_slide):
     """Missing TOKEN_FACTORY_API_KEY raises a clean AppError, not a stack trace."""
     faculty = ctx.make_faculty()
     subj = ctx.make_subject(faculty["user_id"])
     co = ctx.make_co(subj["subject_id"], 1, "CO1")
     mod = ctx.make_module(subj["subject_id"], 1, "Module 1")
+    tagged_slide(mod["module_id"], co["co_id"])
 
     # Env vars are NOT set (monkeypatch doesn't set them)
     monkeypatch.delenv("TOKEN_FACTORY_API_KEY", raising=False)
@@ -499,3 +535,32 @@ def test_generate_quiz_missing_env_var(db, ctx, monkeypatch):
         generate_quiz(args, user, db)
     assert exc.value.status_code == 500
     assert "not configured" in exc.value.message.lower()
+
+
+def test_generate_quiz_rejects_missing_tagged_content(db, ctx, fake_ai):
+    """AI generation must not proceed without CO-tagged slides."""
+    faculty = ctx.make_faculty()
+    subj = ctx.make_subject(faculty["user_id"])
+    co = ctx.make_co(subj["subject_id"], 1, "CO1")
+    mod = ctx.make_module(subj["subject_id"], 1, "Module 1")
+
+    user = {"user_id": faculty["user_id"], "role": "faculty"}
+    args = GenerateQuizArgs(
+        module_id=mod["module_id"],
+        co_id=co["co_id"],
+        difficulty="easy",
+        count=1,
+    )
+
+    with pytest.raises(AppError) as exc:
+        generate_quiz(args, user, db)
+
+    assert exc.value.status_code == 422
+    assert exc.value.code == "NO_TAGGED_CONTENT"
+
+    count = db.execute(
+        text("SELECT COUNT(*) FROM questions WHERE module_id = :mid"),
+        {"mid": mod["module_id"]},
+    ).scalar_one()
+
+    assert count == 0
