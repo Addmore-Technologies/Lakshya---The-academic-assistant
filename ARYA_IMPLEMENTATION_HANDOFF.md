@@ -1,57 +1,46 @@
-# Arya faculty workflow implementation handoff
+# Arya implementation handoff — 13 November 2026
 
-## Implemented in this delivery
+## Delivered in this archive
 
-### Subject CO setup (R1)
-- Added a subject-level CO1–CO6 editor to the faculty upload page.
-- Descriptions, threshold percentages and target-attainment percentages are saved through the existing authenticated `PUT /subjects/{id}/cos` API.
-- The editor checks missing descriptions, duplicate CO numbers and percentage bounds; it also reports missing/duplicate numbers already returned by the API.
-- COs are configured once per subject and are not requested during module upload.
+- Subject CO setup/editing for CO1–CO6 in the faculty upload workflow, persisted with `PUT /subjects/{id}/cos`; client-side missing-description, range and duplicate-number validation.
+- Module creation/selection and upload of `.pptx` and `.pdf` files, with a 25 MB client/server limit and server-side file signature validation.
+- Background processing status polling, tagging/coverage summary, per-slide/page extracted text, CO matches and match confidence. Unmatched chunks remain visible for review.
+- Authenticated question edit, approve and reject actions; filters for module, CO, source and review status.
+- Quiz publish checks requiring selected questions to be approved.
+- PDF text extraction using `pypdf`; page numbers use the existing `slide_number` field.
+- Added parser tests for text extraction, blank/image-only pages and invalid PDF bytes.
 
-### Module upload (R2)
-- Updated the picker to show `.pptx` and `.pdf`, file size validation (25 MB), module number/title, progress and error states.
-- Removed all manual CO selection from module upload.
-- After the backend's `202`, the UI says the upload was accepted and polls `/modules/{id}/status` while pending/processing. It does not announce processing completion until the API reports it.
-- The existing backend contract currently accepts `.pptx` only. PDF selection is therefore blocked with an explicit explanation rather than sent to an endpoint that will reject it. Enable PDF parsing in the backend before removing this guard.
+## Verified in this workspace
 
-### CO coverage evidence (R3)
-- Added authenticated `GET /modules/{id}/chunks`.
-- The endpoint returns slide number, extracted text, tag status, all linked CO numbers and stored confidence.
-- Faculty can inspect individual slide evidence and see unmatched slides.
-- Subject coverage displays zero-evidence COs explicitly.
-- UI clarifies that confidence is not attainment.
-- The database does not record explicit-label versus AI-inferred provenance. The UI labels the existing stored matches as AI-inferred and does not claim explicit labels were distinguished.
-- There is no correction endpoint in the current backend contract, so durable incorrect-tag flagging is not implemented yet.
+- `PYTHONPATH=backend pytest -q tests/unit/test_pdf_parser.py tests/unit/test_pipeline.py tests/unit/test_ppt.py tests/unit/test_module_chunks_detail.py` — 35 passed.
+- `python -m compileall -q backend/app` — passed.
 
-### Question review (R4)
-- Added module filtering alongside existing CO, source and review-status filters.
-- Added a working edit flow using authenticated `PATCH /questions/{id}` for question text, four options, correct answer and explanation.
-- Normalized backend lowercase statuses for the existing UI's title-case status chips and filters.
-- Quiz Builder now prevents publishing if the current selected question set is not entirely present and approved in the current question bank.
-- Regeneration is not exposed by the current API contract; the UI says it is unavailable rather than showing a fake success.
-- Exact slide/page provenance is not part of the current question response schema; the review UI discloses that it is not supplied.
+## Not verified / remaining API dependencies
 
-## Files changed
-- `frontend/src/routes/faculty.upload.tsx`
-- `frontend/src/routes/faculty.review.tsx`
-- `frontend/src/routes/faculty.quiz-builder.tsx`
-- `frontend/src/lib/api.ts`
-- `backend/app/pg/chunks.py`
-- `backend/app/routers/upload.py`
-- `docs/api-contract.md`
-- `docs/arya-integration-notes.md`
+- Full backend suite could not collect in this workspace because `DATABASE_URL` is unset and `bcrypt` is not installed. Set up the project's normal virtual environment and required test services before running it.
+- Frontend dependencies were not installed here; `npm ci --ignore-scripts` timed out. Run frontend tests/build/lint locally after dependency installation.
+- No hosted Supabase/Render deployment test was run.
+- Scanned/image-only PDF OCR is not implemented; those pages are reported as skipped.
+- CO-tag correction endpoint is not present in the current backend contract.
+- Tag provenance (explicit source label vs AI inference) is not stored in the current schema.
+- Authenticated question regeneration endpoint is not present; the UI does not claim to regenerate questions.
+- Real AI/Token Factory calls and mobile browser QA remain to be verified with team credentials/devices.
 
-## API handoff items for Aparna
-1. Enable PDF parsing and update `POST /modules/{id}/upload` contract (currently `.pptx` only).
-2. Add a durable incorrect-tag correction endpoint, including whether a faculty correction replaces or supplements AI tags.
-3. Add tag provenance (`explicit` vs `ai`) if explicit labels in uploaded material need a distinct visual treatment.
-4. Add authenticated question regeneration contract and request/response shape.
-5. Include source slide/page identifiers in generated question records/responses.
+## Run locally
 
-## Verification
-- Python `compileall` passed for the backend source.
-- Focused backend unit tests passed: 6 tests (`test_module_status.py` + `test_module_chunks_detail.py`).
-- Frontend build/typecheck and pytest could not be completed in this environment:
-  - `frontend/node_modules` was absent and offline npm install failed because the package tarballs were not cached.
-  - The broader backend integration test collection is blocked because the environment lacks the `bcrypt` dependency; the focused unit tests listed above pass.
-- No live backend/database/browser integration was run. Install project dependencies and run the normal CI checks before merging.
+From the repository root:
+
+```bash
+# Backend (activate your existing .venv first)
+pip install -r backend/requirements.txt
+PYTHONPATH=backend pytest -q
+
+# Frontend
+cd frontend
+npm ci
+npm test
+npm run build
+npm run lint
+```
+
+Do not run seed commands against the shared database unless the team has explicitly approved it.

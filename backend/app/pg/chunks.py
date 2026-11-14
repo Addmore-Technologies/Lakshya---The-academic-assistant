@@ -217,20 +217,76 @@ def slide_chunks_for_subject(conn: Any, subject_id: str) -> list[dict[str, Any]]
 
 
 def module_chunks_with_co(conn: Any, module_id: str) -> list[dict[str, Any]]:
-    """Chunks of one module, each with its best-matching CO id (None if untagged)."""
+    """Return module slide chunks with their highest-confidence CO tag and confidence."""
     rows = conn.execute(
         text(
-            "SELECT ch.id, ch.slide_number, ch.text, "
-            "  (SELECT cc.co_id FROM chunk_cos cc WHERE cc.chunk_id = ch.id "
-            "   ORDER BY cc.confidence DESC NULLS LAST LIMIT 1) AS co_id "
-            "FROM content_chunks ch WHERE ch.module_id = :m ORDER BY ch.slide_number"
+            "SELECT ch.id, ch.slide_number, ch.text, best.co_id, best.co_number, best.confidence "
+            "FROM content_chunks ch "
+            "LEFT JOIN LATERAL ("
+            "  SELECT cc.co_id, co.number AS co_number, cc.confidence "
+            "  FROM chunk_cos cc JOIN course_outcomes co ON co.id = cc.co_id "
+            "  WHERE cc.chunk_id = ch.id "
+            "  ORDER BY cc.confidence DESC NULLS LAST LIMIT 1"
+            ") best ON TRUE "
+            "WHERE ch.module_id = :m ORDER BY ch.slide_number, ch.id"
         ),
         {"m": as_uuid(module_id, "Module")},
     ).fetchall()
     return [
-        {"chunk_id": str(r[0]), "slide_number": int(r[1]), "text": r[2], "co_id": str(r[3]) if r[3] else None}
+        {
+            "chunk_id": str(r[0]),
+            "slide_number": int(r[1]),
+            "text": r[2],
+            "co_id": str(r[3]) if r[3] else None,
+            "co_number": int(r[4]) if r[4] is not None else None,
+            "confidence": float(r[5]) if r[5] is not None else None,
+        }
         for r in rows
     ]
+
+
+def module_chunks_detail(conn: Any, module_id: str) -> list[dict[str, Any]]:
+    """Return every slide chunk with all of its linked course outcomes."""
+    rows = conn.execute(
+        text(
+            "SELECT ch.id, ch.slide_number, ch.text, ch.tag_status, "
+            "co.number AS co_number, cc.confidence "
+            "FROM content_chunks ch "
+            "LEFT JOIN chunk_cos cc ON cc.chunk_id = ch.id "
+            "LEFT JOIN course_outcomes co ON co.id = cc.co_id "
+            "WHERE ch.module_id = :m "
+            "ORDER BY ch.slide_number, ch.id, co.number"
+        ),
+        {"m": as_uuid(module_id, "Module")},
+    ).mappings().fetchall()
+
+    grouped: dict[str, dict[str, Any]] = {}
+
+    for row in rows:
+        chunk_id = str(row["id"])
+
+        if chunk_id not in grouped:
+            grouped[chunk_id] = {
+                "id": chunk_id,
+                "slide_number": int(row["slide_number"]),
+                "text": row["text"],
+                "tag_status": row["tag_status"],
+                "course_outcomes": [],
+            }
+
+        if row["co_number"] is not None:
+            grouped[chunk_id]["course_outcomes"].append(
+                {
+                    "co_number": int(row["co_number"]),
+                    "confidence": (
+                        float(row["confidence"])
+                        if row["confidence"] is not None
+                        else None
+                    ),
+                }
+            )
+
+    return list(grouped.values())
 
 
 class PostgresChunkRetrievalStore:
@@ -258,39 +314,3 @@ class PostgresChunkRetrievalStore:
         for cid, mid, slide, body in rows:
             index.add_chunk(subject_id, str(cid), str(mid), int(slide), body)
         return index.search_chunks(subject_id, query, top_k=top_k)
-
-
-def module_chunks_detail(conn: Any, module_id: str) -> list[dict[str, Any]]:
-    """Return extracted slide text and every CO tag with its stored confidence."""
-    rows = conn.execute(
-        text(
-            "SELECT ch.id, ch.slide_number, ch.text, ch.tag_status, "
-            "co.number AS co_number, cc.confidence "
-            "FROM content_chunks ch "
-            "LEFT JOIN chunk_cos cc ON cc.chunk_id = ch.id "
-            "LEFT JOIN course_outcomes co ON co.id = cc.co_id "
-            "WHERE ch.module_id = :m "
-            "ORDER BY ch.slide_number, co.number"
-        ),
-        {"m": as_uuid(module_id, "Module")},
-    ).mappings().fetchall()
-    grouped: dict[str, dict[str, Any]] = {}
-    for row in rows:
-        item = grouped.setdefault(
-            str(row["id"]),
-            {
-                "chunk_id": str(row["id"]),
-                "slide_number": int(row["slide_number"]),
-                "text": row["text"] or "",
-                "tag_status": row["tag_status"],
-                "course_outcomes": [],
-            },
-        )
-        if row["co_number"] is not None:
-            item["course_outcomes"].append(
-                {
-                    "co_number": int(row["co_number"]),
-                    "confidence": float(row["confidence"]) if row["confidence"] is not None else None,
-                }
-            )
-    return list(grouped.values())

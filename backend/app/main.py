@@ -37,6 +37,7 @@ from .routers import (
     calendar,
     usage,
     agent,
+    ai_diagnostic,
 )
 from .services.agent_runtime import (
     close_agent_runtime,
@@ -92,6 +93,7 @@ routers = [
     calendar.router,
     usage.router,
     agent.router,
+    ai_diagnostic.router,
 ]
 
 for router in routers:

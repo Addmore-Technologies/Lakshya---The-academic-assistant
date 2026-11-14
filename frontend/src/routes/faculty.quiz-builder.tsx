@@ -26,15 +26,25 @@ export const Route = createFileRoute("/faculty/quiz-builder")({
 function Page() {
   const queryClient = useQueryClient();
   const [subjectId, setSubjectId] = useState<string | null>(() => getStoredSubjectId());
-  const [quizTitle, setQuizTitle] = useState("Quiz 4 · Normalisation & SQL");
+  const [quizTitle, setQuizTitle] = useState("");
   const [quizModule, setQuizModule] = useState<string>("");
-  const [opensAt, setOpensAt] = useState("2026-10-23T09:00");
-  const [closesAt, setClosesAt] = useState("2026-10-25T23:59");
+  const [opensAt, setOpensAt] = useState("");
+  const [closesAt, setClosesAt] = useState("");
   const [sel, setSel] = useState<string[]>([]);
   const [term, setTerm] = useState("");
   const [activeCO, setActiveCO] = useState<number | null>(null);
   const [drag, setDrag] = useState<number | null>(null);
   const [savedQuiz, setSavedQuiz] = useState<Quiz | null>(null);
+  const [savedQuizConfig, setSavedQuizConfig] = useState<string | null>(null);
+
+  const currentQuizConfig = () =>
+    JSON.stringify({
+      title: quizTitle.trim(),
+      module: quizModule,
+      questions: sel,
+      opensAt,
+      closesAt,
+    });
 
   const { data: subjectList } = useQuery({
     queryKey: ["subjects"],
@@ -83,8 +93,17 @@ function Page() {
 
   const createMutation = useMutation({
     mutationFn: async () => {
-      const moduleId = quizModule || availableModules[0]?.id;
+      const moduleId = quizModule;
       if (!moduleId) throw new Error("Select a module first.");
+      if (!quizTitle.trim()) throw new Error("Enter a quiz title.");
+      if (
+        picked.length !== sel.length ||
+        picked.some((question) => question.status.toLowerCase() !== "approved")
+      ) {
+        throw new Error(
+          "Only questions that are still approved can be published. Refresh the question bank and review your selection.",
+        );
+      }
       return quizzes.create({
         module_id: moduleId,
         title: quizTitle,
@@ -96,6 +115,7 @@ function Page() {
     onSuccess: (quiz) => {
       queryClient.invalidateQueries({ queryKey: ["quizzes", activeSubject] });
       setSavedQuiz(quiz);
+      setSavedQuizConfig(currentQuizConfig());
     },
     onError: (e) => {
       if (e instanceof ApiError) toast.error(e.message);
@@ -107,12 +127,17 @@ function Page() {
     mutationFn: async () => {
       const timeErr = validateTimes();
       if (timeErr) throw new Error(timeErr);
-      const quiz = await createMutation.mutateAsync();
+      const quiz =
+        savedQuiz && savedQuizConfig === currentQuizConfig()
+          ? savedQuiz
+          : await createMutation.mutateAsync();
       await quizzes.publish(quiz.id);
       return quiz;
     },
     onSuccess: (quiz) => {
       queryClient.invalidateQueries({ queryKey: ["quizzes", activeSubject] });
+      setSavedQuiz(null);
+      setSavedQuizConfig(null);
       toast.success(`Quiz "${quiz.title}" published`);
     },
     onError: (e) => {
@@ -127,24 +152,26 @@ function Page() {
       toast.error(timeErr);
       return;
     }
-    if (sel.length === 0) {
-      toast.error("Add at least one question to the quiz.");
+    if (!quizTitle.trim()) {
+      toast.error("Enter a quiz title.");
       return;
     }
-    if (
-      picked.length !== sel.length ||
-      picked.some((question) => question.status.toLowerCase() !== "approved")
-    ) {
-      toast.error(
-        "Only questions that are still approved can be published. Refresh the question bank and review your selection.",
-      );
-      queryClient.invalidateQueries({ queryKey: ["question-bank", activeSubject] });
+    if (!quizModule) {
+      toast.error("Select a module.");
+      return;
+    }
+    if (sel.length === 0) {
+      toast.error("Add at least one question to the quiz.");
       return;
     }
     publishMutation.mutate();
   };
 
   const handleSaveDraft = () => {
+    if (!quizTitle.trim() || !quizModule) {
+      toast.error("Enter a title and select a module.");
+      return;
+    }
     if (sel.length === 0) {
       toast.error("Add at least one question to the quiz.");
       return;
@@ -196,12 +223,7 @@ function Page() {
             <Btn
               size="lg"
               onClick={handlePublish}
-              disabled={
-                publishMutation.isPending ||
-                sel.length === 0 ||
-                picked.length !== sel.length ||
-                picked.some((question) => question.status.toLowerCase() !== "approved")
-              }
+              disabled={publishMutation.isPending || sel.length === 0}
             >
               <Send className="size-4" />
               {publishMutation.isPending ? "Publishing…" : "Publish quiz"}
@@ -209,9 +231,9 @@ function Page() {
           </div>
         }
       />
-      <div className="grid grid-cols-1 gap-5 lg:grid-cols-12">
-        <Card className="lg:col-span-12">
-          <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
+      <div className="grid grid-cols-12 gap-5">
+        <Card className="col-span-12">
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
             <Field label="Quiz title">
               <input
                 className={inputCls}
@@ -253,7 +275,7 @@ function Page() {
         </Card>
 
         <Card
-          className="lg:col-span-6"
+          className="col-span-12 lg:col-span-6"
           title="Question bank"
           action={
             <span className="font-mono text-[11px] text-muted-foreground">approved only</span>
@@ -313,7 +335,7 @@ function Page() {
           )}
         </Card>
 
-        <div className="space-y-5 lg:col-span-6">
+        <div className="col-span-6 space-y-5">
           <div className="paper-wine p-5">
             <div className="flex items-end justify-between">
               <div>
@@ -330,7 +352,14 @@ function Page() {
               </div>
             </div>
           </div>
-          <Card title={`Selected · ${picked.length}`}>
+          <Card
+            title={`Selected · ${picked.length}`}
+            action={
+              <span className="font-mono text-xs text-muted-foreground">
+                {picked.reduce((sum, question) => sum + (question.marks ?? 1), 0)} marks
+              </span>
+            }
+          >
             {picked.length === 0 && (
               <p className="py-8 text-center font-serif text-lg text-muted-foreground">
                 Nothing pinned yet — add from the bank.
@@ -369,13 +398,13 @@ function Page() {
           </Card>
         </div>
 
-        <Card className="lg:col-span-12" title="Existing quizzes">
+        <Card className="col-span-12" title="Existing quizzes">
           {!existingQuizzes?.length ? (
             <p className="py-6 text-center text-sm text-muted-foreground">
               No quizzes created yet.
             </p>
           ) : (
-            <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
               {existingQuizzes.map((q) => (
                 <div key={q.id} className="rounded-xl border border-wine/15 p-4">
                   <Chip s={q.published ? "Published" : "Draft"} />

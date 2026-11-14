@@ -36,12 +36,12 @@ function Page() {
   const [genCO, setGenCO] = useState<number | null>(null);
   const [genCount, setGenCount] = useState("10");
   const [moduleFilter, setModuleFilter] = useState<string>("All");
-  const [editingQuestion, setEditingQuestion] = useState<Question | null>(null);
+  const [difficultyFilter, setDifficultyFilter] = useState<string>("All");
+  const [editingId, setEditingId] = useState<string | null>(null);
   const [editStem, setEditStem] = useState("");
-  const [editOptions, setEditOptions] = useState<string[]>(["", "", "", ""]);
+  const [editOptions, setEditOptions] = useState<string[]>([]);
   const [editCorrect, setEditCorrect] = useState(0);
   const [editExplanation, setEditExplanation] = useState("");
-  const [editError, setEditError] = useState<string | null>(null);
 
   const { data: subjectList } = useQuery({
     queryKey: ["subjects"],
@@ -59,7 +59,12 @@ function Page() {
   const availableModules = detail?.modules ?? [];
   const allCOs = detail?.cos ?? [];
 
-  const { data: allQuestions } = useQuery<Question[]>({
+  const {
+    data: allQuestions,
+    isLoading: questionsLoading,
+    isError: questionsError,
+    refetch: refetchQuestions,
+  } = useQuery<Question[]>({
     queryKey: ["review-questions", activeSubject],
     queryFn: async () => {
       if (!availableModules.length) return [];
@@ -99,63 +104,31 @@ function Page() {
     },
   });
 
-  const editMutation = useMutation({
-    mutationFn: () => {
-      if (!editingQuestion) throw new Error("No question selected");
-      return questions.update(editingQuestion.id, {
+  const updateMutation = useMutation({
+    mutationFn: (id: string) =>
+      questions.update(id, {
         stem: editStem.trim(),
         options: editOptions.map((option) => option.trim()),
         correct_option: editCorrect,
         explanation: editExplanation.trim(),
-      });
-    },
+      }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["review-questions", activeSubject] });
-      setEditingQuestion(null);
-      setEditError(null);
-      toast.success("Draft question updated.");
+      setEditingId(null);
+      toast.success("Question updated");
     },
-    onError: (error) => {
-      setEditError(error instanceof ApiError ? error.message : "Could not save this question.");
+    onError: (e) => {
+      if (e instanceof ApiError) toast.error(e.message);
+      else toast.error("Could not save question changes.");
     },
   });
 
-  const openEditor = (question: Question) => {
-    setEditingQuestion(question);
-    setEditStem(question.stem);
-    setEditOptions([...question.options]);
-    setEditCorrect(question.correct_option);
-    setEditExplanation(question.explanation ?? "");
-    setEditError(null);
-  };
-
-  const saveEditedQuestion = () => {
-    if (
-      !editStem.trim() ||
-      editOptions.length !== 4 ||
-      editOptions.some((option) => !option.trim())
-    ) {
-      setEditError("Enter a question and all four answer options.");
-      return;
-    }
-    editMutation.mutate();
-  };
-
-  const approveVisible = async () => {
-    const draftIds = visible
-      .filter((question) => question.status.toLowerCase() === "draft")
-      .map((question) => question.id);
-    if (!draftIds.length) return;
-    try {
-      await Promise.all(draftIds.map((id) => questions.approve(id)));
-      await queryClient.invalidateQueries({ queryKey: ["review-questions", activeSubject] });
-      toast.success(`Approved ${draftIds.length} questions.`);
-    } catch (error) {
-      toast.error(
-        error instanceof ApiError ? error.message : "Some questions could not be approved.",
-      );
-      queryClient.invalidateQueries({ queryKey: ["review-questions", activeSubject] });
-    }
+  const startEditing = (q: Question) => {
+    setEditingId(q.id);
+    setEditStem(q.stem);
+    setEditOptions([...q.options]);
+    setEditCorrect(q.correct_option);
+    setEditExplanation(q.explanation ?? "");
   };
 
   const set = (id: string, s: Status) => {
@@ -163,26 +136,26 @@ function Page() {
     else if (s === "Rejected") rejectMutation.mutate(id);
   };
 
+  const displayStatus = (status: string): Status =>
+    (status.charAt(0).toUpperCase() + status.slice(1).toLowerCase()) as Status;
+
   const visible = (allQuestions ?? []).filter((q) => {
-    const matchesStatus = filter === "All" || q.status.toLowerCase() === filter.toLowerCase();
+    const matchesStatus = filter === "All" || displayStatus(q.status) === filter;
+    const normalizedSource = q.source.toLowerCase();
     const matchesSource =
       sourceFilter === "All" ||
-      (sourceFilter === "AI" && q.source.toLowerCase() === "ai") ||
-      (sourceFilter === "Faculty" && q.source.toLowerCase() === "faculty");
+      (sourceFilter === "AI" && normalizedSource === "ai") ||
+      (sourceFilter === "Faculty" && normalizedSource === "faculty");
     const matchesCO = coFilter === null || q.co_number === coFilter;
     const matchesModule = moduleFilter === "All" || q.module_id === moduleFilter;
-    return matchesStatus && matchesSource && matchesCO && matchesModule;
+    const matchesDifficulty =
+      difficultyFilter === "All" ||
+      (q.difficulty ?? "").toLowerCase() === difficultyFilter.toLowerCase();
+    return matchesStatus && matchesSource && matchesCO && matchesModule && matchesDifficulty;
   });
 
   const count = (s: Status) =>
-    (allQuestions ?? []).filter((q) => q.status.toLowerCase() === s.toLowerCase()).length;
-
-  const displayStatus = (status: string): Status => {
-    const normalized = status.toLowerCase();
-    if (normalized === "approved") return "Approved";
-    if (normalized === "rejected") return "Rejected";
-    return "Draft";
-  };
+    (allQuestions ?? []).filter((q) => displayStatus(q.status) === s).length;
 
   if (!subjectList?.length) {
     return (
@@ -200,19 +173,33 @@ function Page() {
         title="Question review"
         right={
           <Btn
-            onClick={approveVisible}
             disabled={
-              approveMutation.isPending ||
-              !visible.some((question) => question.status.toLowerCase() === "draft")
+              approveMutation.isPending || !visible.some((q) => displayStatus(q.status) === "Draft")
             }
+            onClick={async () => {
+              const draftIds = visible
+                .filter((q) => displayStatus(q.status) === "Draft")
+                .map((q) => q.id);
+              try {
+                await Promise.all(draftIds.map((id) => questions.approve(id)));
+                await queryClient.invalidateQueries({
+                  queryKey: ["review-questions", activeSubject],
+                });
+                toast.success(`Approved ${draftIds.length} questions`);
+              } catch (error) {
+                if (error instanceof ApiError) toast.error(error.message);
+                else toast.error("Some questions could not be approved. Refresh and retry.");
+                queryClient.invalidateQueries({ queryKey: ["review-questions", activeSubject] });
+              }
+            }}
           >
             <Check className="size-4" />
             Approve all visible
           </Btn>
         }
       />
-      <div className="grid grid-cols-1 gap-5 lg:grid-cols-12">
-        <div className="space-y-4 lg:col-span-8">
+      <div className="grid grid-cols-12 gap-5">
+        <div className="col-span-12 lg:col-span-8 space-y-4">
           {/* Filters */}
           <div className="flex flex-wrap items-center gap-2">
             {(["All", "Draft", "Approved", "Rejected"] as const).map((s) => (
@@ -233,19 +220,6 @@ function Page() {
               </button>
             ))}
             <div className="flex-1" />
-            <select
-              value={moduleFilter}
-              onChange={(e) => setModuleFilter(e.target.value)}
-              className="h-9 rounded-full border border-wine/30 bg-ivory px-3 text-xs text-wine"
-              aria-label="Filter by module"
-            >
-              <option value="All">Module: All</option>
-              {availableModules.map((module) => (
-                <option key={module.id} value={module.id}>
-                  M{module.number} · {module.title}
-                </option>
-              ))}
-            </select>
             <select
               value={sourceFilter}
               onChange={(e) => setSourceFilter(e.target.value as "All" | "AI" | "Faculty")}
@@ -268,15 +242,57 @@ function Page() {
               ))}
             </select>
             <select
+              value={moduleFilter}
+              onChange={(e) => setModuleFilter(e.target.value)}
               className="h-9 rounded-full border border-wine/30 bg-ivory px-3 text-xs text-wine"
-              defaultValue=""
+              aria-label="Filter by module"
             >
-              <option value="">Difficulty: All</option>
+              <option value="All">Module: All</option>
+              {availableModules.map((module) => (
+                <option key={module.id} value={module.id}>
+                  M{module.number} · {module.title}
+                </option>
+              ))}
+            </select>
+            <select
+              className="h-9 rounded-full border border-wine/30 bg-ivory px-3 text-xs text-wine"
+              value={difficultyFilter}
+              onChange={(e) => setDifficultyFilter(e.target.value)}
+              aria-label="Filter by difficulty"
+            >
+              <option value="All">Difficulty: All</option>
+              {[
+                ...new Set(
+                  (allQuestions ?? [])
+                    .map((question) => question.difficulty)
+                    .filter((value): value is string => Boolean(value)),
+                ),
+              ].map((difficulty) => (
+                <option key={difficulty} value={difficulty}>
+                  {difficulty}
+                </option>
+              ))}
             </select>
           </div>
 
           {/* Question list */}
-          {visible.length === 0 ? (
+          {questionsLoading ? (
+            <p role="status" className="py-8 text-center text-sm text-muted-foreground">
+              Loading questions…
+            </p>
+          ) : questionsError ? (
+            <div role="alert" className="rounded-xl bg-wine/10 p-5 text-center text-sm text-wine">
+              <p>Questions could not be loaded.</p>
+              <Btn
+                size="sm"
+                variant="secondary"
+                className="mt-3"
+                onClick={() => refetchQuestions()}
+              >
+                Retry
+              </Btn>
+            </div>
+          ) : visible.length === 0 ? (
             <p className="py-8 text-center text-sm text-muted-foreground">
               No questions match your filters.
             </p>
@@ -293,10 +309,12 @@ function Page() {
                     <span
                       className={cn(
                         "rounded-full px-2 py-0.5 text-[11px]",
-                        q.source === "AI" ? "bg-dusty text-oxblood" : "bg-beige text-wine",
+                        q.source.toLowerCase() === "ai"
+                          ? "bg-dusty text-oxblood"
+                          : "bg-beige text-wine",
                       )}
                     >
-                      {q.source === "AI" ? "✦ AI" : "Faculty"}
+                      {q.source.toLowerCase() === "ai" ? "✦ AI" : "Faculty"}
                     </span>
                     {q.difficulty && (
                       <span className="text-[11px] text-muted-foreground">{q.difficulty}</span>
@@ -324,24 +342,90 @@ function Page() {
                       </div>
                     ))}
                   </div>
+                  {editingId === q.id && (
+                    <div className="mt-4 space-y-3 rounded-xl border border-wine/20 bg-beige/30 p-4">
+                      <Field label="Question text">
+                        <textarea
+                          className={inputCls}
+                          rows={3}
+                          value={editStem}
+                          onChange={(e) => setEditStem(e.target.value)}
+                        />
+                      </Field>
+                      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                        {editOptions.map((option, index) => (
+                          <Field key={index} label={`Option ${"ABCD"[index]}`}>
+                            <input
+                              className={inputCls}
+                              value={option}
+                              onChange={(e) =>
+                                setEditOptions((current) =>
+                                  current.map((value, i) => (i === index ? e.target.value : value)),
+                                )
+                              }
+                            />
+                          </Field>
+                        ))}
+                      </div>
+                      <Field label="Correct option">
+                        <select
+                          className={inputCls}
+                          value={editCorrect}
+                          onChange={(e) => setEditCorrect(Number(e.target.value))}
+                        >
+                          {editOptions.map((_, index) => (
+                            <option key={index} value={index}>
+                              Option {"ABCD"[index]}
+                            </option>
+                          ))}
+                        </select>
+                      </Field>
+                      <Field label="Explanation">
+                        <textarea
+                          className={inputCls}
+                          rows={2}
+                          value={editExplanation}
+                          onChange={(e) => setEditExplanation(e.target.value)}
+                        />
+                      </Field>
+                      <div className="flex justify-end gap-2">
+                        <Btn variant="ghost" size="sm" onClick={() => setEditingId(null)}>
+                          Cancel
+                        </Btn>
+                        <Btn
+                          size="sm"
+                          disabled={
+                            updateMutation.isPending ||
+                            !editStem.trim() ||
+                            editOptions.length < 2 ||
+                            editOptions.some((option) => !option.trim())
+                          }
+                          onClick={() => updateMutation.mutate(q.id)}
+                        >
+                          {updateMutation.isPending ? "Saving…" : "Save changes"}
+                        </Btn>
+                      </div>
+                    </div>
+                  )}
                   {q.explanation && (
                     <p className="mt-3 border-l-2 border-dusty pl-3 text-sm text-muted-foreground">
                       <b className="text-espresso">Why:</b> {q.explanation}
                     </p>
                   )}
-                  <p className="mt-3 text-xs text-muted-foreground">
-                    Source location: not supplied by the current question API contract.
-                  </p>
                   <div className="mt-4 flex justify-end gap-2">
-                    <Btn variant="ghost" size="sm" onClick={() => openEditor(q)}>
+                    <Btn
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => (editingId === q.id ? setEditingId(null) : startEditing(q))}
+                    >
                       <Pencil className="size-3.5" />
-                      Edit
+                      {editingId === q.id ? "Close editor" : "Edit"}
                     </Btn>
                     <Btn
                       variant="secondary"
                       size="sm"
                       onClick={() => set(q.id, "Rejected")}
-                      disabled={q.status.toLowerCase() === "rejected"}
+                      disabled={displayStatus(q.status) === "Rejected"}
                     >
                       <X className="size-3.5" />
                       Reject
@@ -349,7 +433,7 @@ function Page() {
                     <Btn
                       size="sm"
                       onClick={() => set(q.id, "Approved")}
-                      disabled={q.status.toLowerCase() === "approved"}
+                      disabled={displayStatus(q.status) === "Approved"}
                     >
                       <Check className="size-3.5" />
                       Approve
@@ -361,90 +445,8 @@ function Page() {
           )}
         </div>
 
-        {editingQuestion && (
-          <div
-            className="fixed inset-0 z-50 flex items-center justify-center bg-espresso/50 p-4"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="edit-question-title"
-          >
-            <div className="max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-2xl bg-ivory p-6 shadow-2xl">
-              <div className="flex items-center justify-between gap-3">
-                <h2 id="edit-question-title" className="font-serif text-2xl text-wine">
-                  Edit question draft
-                </h2>
-                <button
-                  type="button"
-                  className="rounded-full p-2 hover:bg-beige"
-                  onClick={() => setEditingQuestion(null)}
-                  aria-label="Close editor"
-                >
-                  <X className="size-5" />
-                </button>
-              </div>
-              <div className="mt-4 space-y-4">
-                <Field label="Question">
-                  <textarea
-                    className={cn(inputCls, "min-h-24 w-full")}
-                    value={editStem}
-                    onChange={(e) => setEditStem(e.target.value)}
-                  />
-                </Field>
-                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                  {editOptions.map((option, index) => (
-                    <Field key={index} label={`Option ${"ABCD"[index]}`}>
-                      <input
-                        className={inputCls}
-                        value={option}
-                        onChange={(e) =>
-                          setEditOptions((current) =>
-                            current.map((value, i) => (i === index ? e.target.value : value)),
-                          )
-                        }
-                      />
-                    </Field>
-                  ))}
-                </div>
-                <Field label="Correct answer">
-                  <select
-                    className={inputCls}
-                    value={editCorrect}
-                    onChange={(e) => setEditCorrect(Number(e.target.value))}
-                  >
-                    {["A", "B", "C", "D"].map((letter, index) => (
-                      <option key={letter} value={index}>
-                        {letter}
-                      </option>
-                    ))}
-                  </select>
-                </Field>
-                <Field label="Explanation">
-                  <textarea
-                    className={cn(inputCls, "min-h-20 w-full")}
-                    value={editExplanation}
-                    onChange={(e) => setEditExplanation(e.target.value)}
-                  />
-                </Field>
-                {editError && (
-                  <p role="alert" className="rounded-lg bg-wine/10 p-3 text-sm text-wine">
-                    {editError}
-                  </p>
-                )}
-                <div className="flex justify-end gap-2">
-                  <Btn variant="ghost" onClick={() => setEditingQuestion(null)}>
-                    Cancel
-                  </Btn>
-                  <Btn onClick={saveEditedQuestion} disabled={editMutation.isPending}>
-                    {editMutation.isPending ? "Saving…" : "Save changes"}
-                  </Btn>
-                </div>
-              </div>
-            </div>
-          </div>
-        )}
-
         {/* Sidebar */}
-        <div className="lg:col-span-4">
+        <div className="col-span-12 lg:col-span-4">
           <div className="sticky top-24 space-y-5">
             <div className="grid grid-cols-3 gap-3">
               {(["Draft", "Approved", "Rejected"] as const).map((s) => (
@@ -495,14 +497,17 @@ function Page() {
                       className={inputCls}
                     />
                   </Field>
-                  <Btn className="w-full" disabled>
+                  <Btn
+                    className="w-full"
+                    onClick={() =>
+                      toast(
+                        `AI generation coming soon — selected ${genCount} questions for ${genModule ? "module" : "subject"}`,
+                      )
+                    }
+                  >
                     <Sparkle className="size-4" />
-                    Generate unavailable
+                    Generate
                   </Btn>
-                  <p className="text-xs text-muted-foreground">
-                    The current backend exposes draft creation but no authenticated regenerate
-                    endpoint. Generation remains disabled until that contract is supplied.
-                  </p>
                 </div>
               </Card>
             </div>

@@ -69,3 +69,12 @@ Token Factory call, the frontend, concurrent use. Do not describe database integ
 - The existing upload backend still accepts `.pptx` only (25 MB). The UI accepts a PDF selection but blocks submission with a clear backend-contract message until PDF parsing is enabled.
 - The current schema does not store explicit-label-vs-AI tag provenance, nor does it expose a tag-correction endpoint. The UI labels current tags as AI-inferred and does not claim explicit-label provenance.
 - Question editing uses the existing authenticated `PATCH /questions/{id}` route. The API does not currently expose a regenerate endpoint or question-to-slide source citation; regeneration remains disabled and source-location absence is disclosed in the review UI.
+
+
+## 7. Faculty workflow integration update (13 Nov 2026)
+
+The faculty upload screen now includes a six-CO subject setup form (saved once per subject through `PUT /subjects/{id}/cos`), module creation/selection, file-size validation, upload status polling, coverage summary and per-slide/page extracted evidence. The question review screen supports module/CO/status/source filters and authenticated edit, approve and reject calls. Quiz publishing remains blocked unless every selected question is approved.
+
+The upload pipeline now accepts `.pptx` and text-based `.pdf` files (25 MB maximum). PDF pages are extracted into the same chunk shape as PPTX slides; the `slide_number` field is the 1-based page number for a PDF. Image-only/scanned PDF pages are skipped and reported; OCR is not included. PDF support requires `pypdf>=5.0,<6`.
+
+Still dependent on backend/API ownership decisions: there is no correction endpoint for faculty to change an incorrect CO tag; the chunk schema does not distinguish explicit source labels from AI-inferred tags; question regeneration has no authenticated endpoint; and the UI therefore labels tags as matched rather than claiming provenance. Do not represent confidence as attainment.
