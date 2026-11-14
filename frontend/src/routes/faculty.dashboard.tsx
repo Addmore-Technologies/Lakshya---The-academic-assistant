@@ -5,7 +5,7 @@ import { AlertTriangle, ClipboardCheck, FileUp, PenLine, Star } from "lucide-rea
 import { useState } from "react";
 import { Shell } from "@/components/lk/Shell";
 import { Bar, Card, CO, PageHead } from "@/components/lk/ui";
-import { coSheet, questions, quizzes, subjects, calendarApi } from "@/lib/api";
+import { coSheet, questions, quizzes, subjects, calendarApi, upload } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
 import { getStoredSubjectId, storeSubjectId } from "@/lib/subject-context";
 
@@ -35,6 +35,12 @@ function Page() {
   const { data: detail } = useQuery({
     queryKey: ["subject-detail", activeSubject],
     queryFn: () => subjects.get(activeSubject!),
+    enabled: !!activeSubject,
+  });
+
+  const { data: coverage } = useQuery({
+    queryKey: ["coverage", activeSubject],
+    queryFn: () => upload.getCoverage(activeSubject!),
     enabled: !!activeSubject,
   });
 
@@ -164,7 +170,7 @@ function Page() {
       />
       <div className="grid grid-cols-12 gap-5">
         {/* Stats cards */}
-        <div className="paper col-span-3 p-5">
+        <div className="paper col-span-12 p-5 sm:col-span-6 xl:col-span-3">
           <div className="eyebrow">Modules uploaded</div>
           <div className="display mt-2 text-5xl text-wine">
             {modulesDone}/{modulesTotal}
@@ -173,21 +179,21 @@ function Page() {
             {modulesTotal - modulesDone} pending
           </div>
         </div>
-        <div className="paper-wine col-span-3 p-5">
+        <div className="paper-wine col-span-12 p-5 sm:col-span-6 xl:col-span-3">
           <div className="eyebrow !text-beige/70">Awaiting review</div>
           <div className="display mt-2 text-5xl text-ivory">{draftQuestions?.length ?? 0}</div>
           <div className="mt-1 font-mono text-[11px] text-beige/80">
             draft questions across modules
           </div>
         </div>
-        <div className="paper col-span-3 p-5">
+        <div className="paper col-span-12 p-5 sm:col-span-6 xl:col-span-3">
           <div className="eyebrow">Published quizzes</div>
           <div className="display mt-2 text-5xl text-wine">{publishedQuizzes.length}</div>
           <div className="mt-1 font-mono text-[11px] text-muted-foreground">
             {draftQuizzes.length} drafts
           </div>
         </div>
-        <div className="paper col-span-3 p-5">
+        <div className="paper col-span-12 p-5 sm:col-span-6 xl:col-span-3">
           <div className="eyebrow">Class CO attainment</div>
           <div className="display mt-2 text-5xl text-wine">{avgAttainment}%</div>
           <div className="mt-1 font-mono text-[11px] text-muted-foreground">
@@ -197,7 +203,7 @@ function Page() {
 
         {/* CO attainment chart */}
         <Card
-          className="col-span-8"
+          className="col-span-12 xl:col-span-8"
           title="Course outcome attainment"
           action={
             <span className="font-mono text-[11px] text-muted-foreground">
@@ -240,7 +246,7 @@ function Page() {
         </Card>
 
         {/* Weak outcomes + quick actions */}
-        <div className="col-span-4 space-y-5">
+        <div className="col-span-12 xl:col-span-4 space-y-5">
           <div className="paper-wine p-6">
             <div className="flex items-center gap-2">
               <AlertTriangle className="size-4" />
@@ -283,8 +289,64 @@ function Page() {
           </div>
         </div>
 
+        <Card
+          className="col-span-12 xl:col-span-6"
+          title="Modules & CO coverage"
+          action={
+            <Link
+              to="/faculty/upload"
+              className="text-xs font-medium text-wine underline underline-offset-4"
+            >
+              Manage modules
+            </Link>
+          }
+        >
+          {!detail?.modules?.length ? (
+            <p className="py-5 text-sm text-muted-foreground">
+              No modules yet. Upload your first slide deck to begin CO mapping.
+            </p>
+          ) : (
+            <div className="space-y-3">
+              {detail.modules.map((module) => (
+                <div
+                  key={module.id}
+                  className="flex flex-wrap items-center gap-2 border-b border-wine/10 pb-2 last:border-0"
+                >
+                  <div className="min-w-0 flex-1">
+                    <p className="font-medium text-espresso">
+                      M{module.number} · {module.title}
+                    </p>
+                    <p className="text-xs text-muted-foreground">{module.processing_status}</p>
+                  </div>
+                  <Link
+                    to="/faculty/upload"
+                    className="text-xs text-wine underline underline-offset-4"
+                  >
+                    View slides
+                  </Link>
+                </div>
+              ))}
+            </div>
+          )}
+          <div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-3">
+            {(coverage ?? []).map((item) => (
+              <div key={item.co_id} className="rounded-xl bg-beige/50 p-3">
+                <div className="flex items-center justify-between gap-2">
+                  <CO n={item.co_number} />
+                  <span className="font-mono text-sm">{item.chunk_count}</span>
+                </div>
+                <p
+                  className={`mt-1 text-xs ${item.warning ? "text-wine font-medium" : "text-muted-foreground"}`}
+                >
+                  {item.warning ? "No slide chunks mapped" : "slide chunks mapped"}
+                </p>
+              </div>
+            ))}
+          </div>
+        </Card>
+
         {/* Upcoming events */}
-        <Card className="col-span-4" title="Upcoming events">
+        <Card className="col-span-12 md:col-span-6 xl:col-span-4" title="Upcoming events">
           {upcoming.length ? (
             upcoming.map((e) => (
               <div
@@ -306,7 +368,7 @@ function Page() {
         </Card>
 
         {/* Quiz deadlines */}
-        <Card className="col-span-4" title="Quiz deadlines">
+        <Card className="col-span-12 md:col-span-6 xl:col-span-4" title="Quiz deadlines">
           {!subjectQuizzes?.length ? (
             <p className="py-6 text-center text-sm text-muted-foreground">No quizzes yet.</p>
           ) : (
@@ -328,7 +390,7 @@ function Page() {
         </Card>
 
         {/* Recent activity */}
-        <Card className="col-span-4" title="Recent activity">
+        <Card className="col-span-12 md:col-span-6 xl:col-span-4" title="Recent activity">
           <ul className="space-y-3 text-sm">
             {activity.length ? (
               activity.map((a, i) => (

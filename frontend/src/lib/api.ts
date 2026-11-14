@@ -425,13 +425,19 @@ export interface CreateQuizBody {
 
 export interface ModuleStatus {
   processing_status: string;
-  extraction_status?: string;
-  tagging_status?: string;
-  tagging_error?: string | null;
   chunks_total: number;
   chunks_tagged: number;
   chunks_untagged: number;
   error: string | null;
+}
+
+export interface ModuleChunk {
+  chunk_id: string;
+  slide_number: number;
+  text: string;
+  co_id: string | null;
+  co_number: number | null;
+  confidence: number | null;
 }
 
 export interface CoverageItem {
@@ -440,14 +446,6 @@ export interface CoverageItem {
   chunk_count: number;
   warning: boolean;
   message: string | null;
-}
-
-export interface ModuleChunk {
-  chunk_id: string;
-  slide_number: number;
-  text: string;
-  tag_status: string;
-  course_outcomes: Array<{ co_number: number; confidence: number | null }>;
 }
 
 // ── CO Sheet / Analytics ──
@@ -909,12 +907,12 @@ export const upload = {
     );
   },
 
-  getModuleStatus(moduleId: string): Promise<ModuleStatus> {
-    return apiRequest<ModuleStatus>(`/modules/${encodeURIComponent(moduleId)}/status`);
-  },
-
   getModuleChunks(moduleId: string): Promise<ModuleChunk[]> {
     return apiRequest<ModuleChunk[]>(`/modules/${encodeURIComponent(moduleId)}/chunks`);
+  },
+
+  getModuleStatus(moduleId: string): Promise<ModuleStatus> {
+    return apiRequest<ModuleStatus>(`/modules/${encodeURIComponent(moduleId)}/status`);
   },
 
   getCoverage(subjectId: string): Promise<CoverageItem[]> {

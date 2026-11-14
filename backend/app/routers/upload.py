@@ -46,15 +46,8 @@ class UploadRouterHandler:
         if current_user.get("role") != "faculty":
             return 403, format_error("FORBIDDEN", "Only faculty can upload course modules.")
 
-        extension = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
-        if extension not in {"pptx", "pdf"}:
-            return 400, format_error("BAD_REQUEST", "Only .pptx and .pdf files are supported.")
-
-        if extension == "pptx" and not file_bytes.startswith(b"PK"):
-            return 400, format_error("BAD_REQUEST", "That file is not a valid .pptx presentation.")
-
-        if extension == "pdf" and not file_bytes.lstrip().startswith(b"%PDF-"):
-            return 400, format_error("BAD_REQUEST", "That file is not a valid PDF document.")
+        if not filename.endswith(".pptx"):
+            return 400, format_error("BAD_REQUEST", "Only .pptx files are supported.")
 
         cos = []
         if self.cos_provider:
@@ -68,7 +61,6 @@ class UploadRouterHandler:
                 cos=cos,
                 tagger=self.tagger or (lambda chunks, cos: []),
                 store=self.store,
-                document_type=extension,
             )
             self.statuses[module_id] = {
                 "processing_status": report.status,
@@ -135,7 +127,7 @@ from fastapi import BackgroundTasks
 from ..db import get_conn, get_engine
 from ..deps import require_faculty
 from ..errors import AppError
-from ..pg.chunks import PostgresChunkStore, chunk_co_links, module_chunks_detail, module_status, subject_cos
+from ..pg.chunks import PostgresChunkStore, chunk_co_links, module_status, module_chunks_with_co, subject_cos
 from ..pg.common import module_for_user, subject_for_faculty
 from ..pg.usage import PostgresUsageStore  # noqa: F401  (kept for symmetry with other routers)
 from ..services.ai_glue import UsageRecorder, get_client, make_tagger
@@ -151,7 +143,7 @@ def _co_infos(conn, subject_id: str) -> list[COInfo]:
     return [COInfo(number=c["number"], description=c["description"] or "") for c in subject_cos(conn, subject_id)]
 
 
-def run_upload_pipeline(module_id: str, subject_id: str, data: bytes, user: dict, document_type: str = "pptx") -> None:
+def run_upload_pipeline(module_id: str, subject_id: str, data: bytes, user: dict) -> None:
     """Parse, save and tag one deck on its own connection (runs after the response is sent).
 
     A plain function with no request objects, so it can move to a Nebius Serverless Job.
@@ -169,7 +161,6 @@ def run_upload_pipeline(module_id: str, subject_id: str, data: bytes, user: dict
                     cos=_co_infos(conn, subject_id),
                     tagger=make_tagger(client, recorder),
                     store=store,
-                    document_type=document_type,
                 )
             finally:
                 if client is not None:
@@ -193,16 +184,13 @@ async def upload_module(
     subject_for_faculty(conn, str(module["subject_id"]), user)
 
     filename = (file.filename or "").strip()
-    extension = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
-    if extension not in {"pptx", "pdf"}:
-        raise AppError(400, "BAD_REQUEST", "Only .pptx and .pdf files are supported.")
+    if not filename.lower().endswith(".pptx"):
+        raise AppError(400, "BAD_REQUEST", "Only .pptx files are supported.")
     data = await file.read(MAX_UPLOAD_BYTES + 1)
     if len(data) > MAX_UPLOAD_BYTES:
         raise AppError(400, "BAD_REQUEST", "File is larger than 25 MB.")
-    if extension == "pptx" and not data.startswith(b"PK"):
+    if not data.startswith(b"PK"):
         raise AppError(400, "BAD_REQUEST", "That file is not a valid .pptx presentation.")
-    if extension == "pdf" and not data.lstrip().startswith(b"%PDF-"):
-        raise AppError(400, "BAD_REQUEST", "That file is not a valid PDF document.")
     if module["processing_status"] == "processing":
         raise AppError(409, "CONFLICT", "This module is already being processed.")
 
@@ -213,8 +201,16 @@ async def upload_module(
     PostgresChunkStore(conn, str(module["subject_id"]), commit_status=True).set_module_status(
         str(module["id"]), "processing"
     )
-    background.add_task(run_upload_pipeline, str(module["id"]), str(module["subject_id"]), data, user, extension)
+    background.add_task(run_upload_pipeline, str(module["id"]), str(module["subject_id"]), data, user)
     return {"module_id": str(module["id"]), "processing_status": "processing"}
+
+
+@router.get("/modules/{module_id}/chunks")
+def get_module_chunks(module_id: str, conn=Depends(get_conn), user=Depends(require_faculty)):
+    """Return extracted slide text and the best-confidence CO tag for faculty review."""
+    module = module_for_user(conn, module_id, user)
+    subject_for_faculty(conn, str(module["subject_id"]), user)
+    return module_chunks_with_co(conn, str(module["id"]))
 
 
 @router.get("/modules/{module_id}/status")
@@ -244,11 +240,3 @@ def get_subject_coverage(subject_id: str, conn=Depends(get_conn), user=Depends(r
         }
         for r in results
     ]
-
-
-@router.get("/modules/{module_id}/chunks")
-def get_module_chunks(module_id: str, conn=Depends(get_conn), user=Depends(require_faculty)):
-    """Faculty view of extracted slide/page text and its CO tags."""
-    module = module_for_user(conn, module_id, user)
-    subject_for_faculty(conn, str(module["subject_id"]), user)
-    return module_chunks_detail(conn, str(module["id"]))

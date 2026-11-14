@@ -144,8 +144,8 @@ Faculty only.
 |---|---|---|---|
 | `POST /modules/{module_id}/upload` | multipart `file` (.pptx) | `202 {module_id, processing_status}` | scaffolded |
 | `GET /modules/{module_id}/status` | none | `{processing_status, chunks_total, chunks_tagged, chunks_untagged, error}` | scaffolded |
+| `GET /modules/{module_id}/chunks` | faculty | `[{chunk_id, slide_number, text, co_id, co_number, confidence}]` | added for faculty slide inspection |
 | `GET /subjects/{subject_id}/coverage` | none | `[{co_id, co_number, chunk_count, warning}]` | scaffolded |
-| `GET /modules/{module_id}/chunks` | faculty | `[{chunk_id, slide_number, text, tag_status, course_outcomes: [{co_number, confidence}]}]` | added in Arya frontend integration |
 
 `processing_status`: `pending`, `processing`, `done`, `failed`. An untagged chunk never fails the upload.
 
