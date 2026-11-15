@@ -68,6 +68,8 @@ def _row_to_co(row) -> dict:
         "subject_id": str(row["subject_id"]),
         "number": row["number"],
         "description": row["description"],
+        "bloom_level": row.get("bloom_level"),
+        "bloom_name": row.get("bloom_name"),
         "threshold_pct": float(row["threshold_pct"]),
         "target_attainment_pct": float(row["target_attainment_pct"]),
     }
@@ -269,6 +271,28 @@ def upsert_cos(
         description = co.get("description")
         threshold = co.get("threshold_pct", 60)
         target = co.get("target_attainment_pct", 60)
+        bloom_level = co.get("bloom_level")
+        bloom_name = co.get("bloom_name")
+
+        if bloom_level is not None:
+            if type(bloom_level) is not int or not 1 <= bloom_level <= 6:
+                raise AppError(422, "VALIDATION_ERROR", "Bloom level must be 1-6")
+
+        bloom_names = {
+            1: "Remembering",
+            2: "Understanding",
+            3: "Applying",
+            4: "Analyzing",
+            5: "Evaluating",
+            6: "Creating",
+        }
+        if bloom_level is not None:
+            bloom_name = bloom_names[bloom_level]
+        elif bloom_name is not None:
+            raise AppError(
+                422, "VALIDATION_ERROR",
+                "Bloom name requires a Bloom level",
+            )
 
         if number is None or not (1 <= number <= 6):
             raise AppError(
@@ -285,12 +309,14 @@ def upsert_cos(
         result = conn.execute(
             text(
                 "INSERT INTO course_outcomes (subject_id, number, description, "
-                "threshold_pct, target_attainment_pct) "
-                "VALUES (:sid, :num, :desc, :thresh, :target) "
+                "threshold_pct, target_attainment_pct, bloom_level, bloom_name) "
+                "VALUES (:sid, :num, :desc, :thresh, :target, :bloom_level, :bloom_name) "
                 "ON CONFLICT (subject_id, number) DO UPDATE SET "
                 "description = EXCLUDED.description, "
                 "threshold_pct = EXCLUDED.threshold_pct, "
-                "target_attainment_pct = EXCLUDED.target_attainment_pct "
+                "target_attainment_pct = EXCLUDED.target_attainment_pct, "
+                "bloom_level = COALESCE(EXCLUDED.bloom_level, course_outcomes.bloom_level), "
+                "bloom_name = COALESCE(EXCLUDED.bloom_name, course_outcomes.bloom_name) "
                 "RETURNING *"
             ),
             {
@@ -299,6 +325,8 @@ def upsert_cos(
                 "desc": description,
                 "thresh": threshold,
                 "target": target,
+                "bloom_level": bloom_level,
+                "bloom_name": bloom_name,
             },
         )
         row = result.mappings().fetchone()
