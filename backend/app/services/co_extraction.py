@@ -1,4 +1,4 @@
-"""Extract course outcomes from course-plan text and searchable PDFs."""
+"""Extract course outcomes from searchable syllabus PDFs."""
 
 from __future__ import annotations
 
@@ -7,21 +7,25 @@ import re
 
 from pypdf import PdfReader
 
-
-CO_START = re.compile(
-    r"(?<![A-Za-z0-9])CO\s*[-:]?\s*([1-9]\d?)\s*[:.\-]?\s*",
+CO_ROW = re.compile(
+    r"^\s*(?:\d{1,2}\s*[.)]\s*)?CO\s*[-:]?\s*([1-6])\b"
+    r"\s*[:.\-]?\s*",
     re.IGNORECASE,
 )
 
-STOP_LINE = re.compile(
-    r"^(?:MODULE\s+[IVX\d]+|COURSE\s+CONTENT|"
-    r"CO\s*[-–]\s*PO|TEXT\s*BOOKS?|REFERENCES|"
-    r"ASSESSMENT\s+PATTERN)",
+SECTION_START = re.compile(
+    r"^\s*Course\s+Outcomes\s*:",
     re.IGNORECASE,
 )
 
+SECTION_END = re.compile(
+    r"^\s*(?:CO\s*[-–]\s*PO(?:/PSO)?\s+Mapping|"
+    r"MODULE\s+[IVX\d]+|COURSE\s+CONTENT|"
+    r"TEXT\s*BOOKS?|REFERENCES)\b",
+    re.IGNORECASE,
+)
 
-BLOOM_LEVELS = {
+BLOOM = {
     "remembering": 1,
     "understanding": 2,
     "applying": 3,
@@ -30,75 +34,113 @@ BLOOM_LEVELS = {
     "creating": 6,
 }
 
+BLOOM_PATTERN = re.compile(
+    r"\b(Remembering|Understanding|Applying|Analyzing|"
+    r"Evaluating|Creating)\s*(?:\(\s*[1-6]\s*\))?",
+    re.IGNORECASE,
+)
+
+
+def _parse_row(number: int, content: str) -> dict | None:
+    """Parse a CO row and its explicitly stated Bloom level."""
+    bloom_match = BLOOM_PATTERN.search(content)
+
+    bloom_name = None
+    bloom_level = None
+
+    if bloom_match:
+        bloom_name = bloom_match.group(1).capitalize()
+        bloom_level = BLOOM[bloom_name.lower()]
+        content = (
+            content[:bloom_match.start()]
+            + " "
+            + content[bloom_match.end():]
+        )
+
+    description = re.sub(r"\s+", " ", content).strip(" .|:-")
+    description = description.rstrip(".")
+
+    # Reject numeric CO-PO mapping rows and malformed descriptions.
+    if len(description) < 15:
+        return None
+
+    if len(re.findall(r"[A-Za-z]+", description)) < 4:
+        return None
+
+    return {
+        "number": number,
+        "description": description,
+        "bloom_level": bloom_level,
+        "bloom_name": bloom_name,
+        "threshold_pct": 60,
+        "target_attainment_pct": 60,
+    }
+
 
 def extract_cos_from_text(text: str) -> list[dict]:
-    """Extract CO1-CO6, including multiline and table-formatted descriptions."""
-    results: dict[int, dict] = {}
+    """Extract CO descriptions, prioritizing explicit CO sections."""
     lines = text.splitlines()
+    results = {}
 
-    for index, line in enumerate(lines):
+    inside_section = False
+    saw_section = False
+    current_number = None
+    current_parts = []
+
+    def finish_row():
+        nonlocal current_number, current_parts
+
+        if current_number is not None:
+            parsed = _parse_row(
+                current_number, " ".join(current_parts)
+            )
+            if parsed is not None:
+                results[current_number] = parsed
+
+        current_number = None
+        current_parts = []
+
+    for line in lines:
         stripped = line.strip()
-        match = CO_START.match(stripped)
 
-        if not match:
+        if SECTION_START.match(stripped):
+            finish_row()
+            inside_section = True
+            saw_section = True
             continue
 
-        number = int(match.group(1))
-        if number > 6 or number in results:
+        if inside_section and SECTION_END.match(stripped):
+            finish_row()
+            inside_section = False
             continue
 
-        parts = []
-        first = stripped[match.end():].strip(" :-–|")
-        if first:
-            parts.append(first)
+        if not inside_section:
+            continue
 
-        for next_line in lines[index + 1:]:
-            candidate = next_line.strip()
+        match = CO_ROW.match(stripped)
 
-            if not candidate:
-                if parts:
-                    break
-                continue
+        if match:
+            finish_row()
+            current_number = int(match.group(1))
+            remainder = stripped[match.end():].strip()
+            if remainder:
+                current_parts.append(remainder)
+            continue
 
-            if CO_START.match(candidate) or STOP_LINE.match(candidate):
-                break
+        if current_number is not None and stripped:
+            current_parts.append(stripped)
 
-            parts.append(candidate)
+    finish_row()
 
-        combined = " ".join(parts)
-        cells = [cell.strip() for cell in combined.split("|") if cell.strip()]
-
-        bloom_level = None
-        bloom_name = None
-        description_parts = []
-
-        for cell in cells:
-            normalized = cell.lower().strip(" .:-")
-            if normalized in BLOOM_LEVELS:
-                bloom_name = normalized.capitalize()
-                bloom_level = BLOOM_LEVELS[normalized]
-            elif normalized.isdigit() and bloom_name:
-                continue
-            else:
-                description_parts.append(cell)
-
-        description = " ".join(description_parts).strip()
-
-        if description:
-            results[number] = {
-                "number": number,
-                "description": description,
-                "bloom_level": bloom_level,
-                "bloom_name": bloom_name,
-                "threshold_pct": 60,
-                "target_attainment_pct": 60,
-            }
+    # Do not fall back to unrelated CO mapping tables.
+    if not saw_section:
+        return []
 
     return [results[n] for n in sorted(results)]
 
 
 def extract_cos_from_pdf(file_bytes: bytes) -> list[dict]:
-    """Extract outcomes from a searchable PDF."""
+    """Extract outcomes from a PDF with selectable text."""
     reader = PdfReader(io.BytesIO(file_bytes))
 
     if reader.is_encrypted:
