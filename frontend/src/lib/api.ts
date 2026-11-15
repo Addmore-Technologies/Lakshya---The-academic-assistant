@@ -276,6 +276,24 @@ export interface CourseOutcome {
   description: string;
   threshold_pct: number;
   target_attainment_pct: number;
+  bloom_level: number | null;
+  bloom_name: string | null;
+}
+
+export interface ExtractedCourseOutcome {
+  number: number;
+  description: string;
+  bloom_level: number | null;
+  bloom_name: string | null;
+  threshold_pct: number;
+  target_attainment_pct: number;
+}
+
+export interface COExtractionPreview {
+  cos: ExtractedCourseOutcome[];
+  count: number;
+  requires_review: boolean;
+  saved: boolean;
 }
 
 export interface ModuleSummary {
@@ -308,6 +326,7 @@ export interface CosUpsert {
     description: string;
     threshold_pct?: number;
     target_attainment_pct?: number;
+    bloom_level?: number | null;
   }>;
 }
 
@@ -727,6 +746,19 @@ export const subjects = {
     return apiRequest<{ deleted: boolean }>(`/subjects/${encodeURIComponent(id)}`, {
       method: "DELETE",
     });
+  },
+
+  extractCOs(
+    subjectId: string,
+    file: File,
+  ): Promise<COExtractionPreview> {
+    const formData = new FormData();
+    formData.append("file", file);
+
+    return apiRequest<COExtractionPreview>(
+      `/subjects/${encodeURIComponent(subjectId)}/cos/extract`,
+      { method: "POST", body: formData },
+    );
   },
 
   listCOs(subjectId: string): Promise<CourseOutcome[]> {

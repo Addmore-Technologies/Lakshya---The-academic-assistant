@@ -10,6 +10,8 @@ import { cn } from "@/lib/utils";
 import { ApiError, modules, roster, subjects, upload } from "@/lib/api";
 import { getStoredSubjectId, storeSubjectId } from "@/lib/subject-context";
 import type {
+  COExtractionPreview,
+  ExtractedCourseOutcome,
   CoverageItem,
   ModuleChunk,
   ModuleStatus,
@@ -41,6 +43,13 @@ function Page() {
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [newModNumber, setNewModNumber] = useState("5");
   const [newModTitle, setNewModTitle] = useState("Query Optimisation");
+
+  // Syllabus PDF extraction
+  const [syllabusFile, setSyllabusFile] = useState<File | null>(null);
+  const [coPreview, setCoPreview] = useState<COExtractionPreview | null>(null);
+  const [editedCOs, setEditedCOs] = useState<ExtractedCourseOutcome[]>([]);
+  const [extractingCOs, setExtractingCOs] = useState(false);
+  const [savingCOs, setSavingCOs] = useState(false);
 
   // Roster upload
   const [rosterFile, setRosterFile] = useState<File | null>(null);
@@ -214,6 +223,124 @@ function Page() {
     }
   };
 
+  const handleSaveCOs = async () => {
+    if (!activeSubject || !coPreview || savingCOs || extractingCOs) return;
+
+    if (!editedCOs.length) {
+      toast.error("No Course Outcomes to save.");
+      return;
+    }
+
+    if (
+      editedCOs.some(
+        (co) =>
+          !Number.isInteger(co.number) ||
+          co.number < 1 ||
+          co.number > 6 ||
+          !co.description.trim(),
+      )
+    ) {
+      toast.error("Each CO must have a number from 1 to 6 and a description.");
+      return;
+    }
+
+    if (new Set(editedCOs.map((co) => co.number)).size !== editedCOs.length) {
+      toast.error("Duplicate Course Outcome numbers are not allowed.");
+      return;
+    }
+
+    const existing = new Map(
+      (detail?.cos ?? []).map((co) => [co.number, co]),
+    );
+
+    const changes = editedCOs.filter((co) => {
+      const previous = existing.get(co.number);
+      return (
+        previous &&
+        (previous.description !== co.description.trim() ||
+          (co.bloom_level !== null &&
+            previous.bloom_level !== co.bloom_level))
+      );
+    }).length;
+
+    const message = changes
+      ? `This will update ${changes} existing Course Outcomes and save the reviewed results. Continue?`
+      : `Approve and save ${editedCOs.length} Course Outcomes?`;
+
+    if (!window.confirm(message)) return;
+
+    setSavingCOs(true);
+
+    try {
+      const saved = await subjects.upsertCOs(activeSubject, {
+        cos: editedCOs.map((co) => {
+          const previous = existing.get(co.number);
+
+          return {
+            number: co.number,
+            description: co.description.trim(),
+            threshold_pct:
+              previous?.threshold_pct ?? co.threshold_pct,
+            target_attainment_pct:
+              previous?.target_attainment_pct ??
+              co.target_attainment_pct,
+            bloom_level:
+              co.bloom_level ?? previous?.bloom_level ?? null,
+          };
+        }),
+      });
+
+      await Promise.all([
+        queryClient.invalidateQueries({
+          queryKey: ["subject-detail", activeSubject],
+        }),
+        queryClient.invalidateQueries({
+          queryKey: ["coverage", activeSubject],
+        }),
+        queryClient.invalidateQueries({
+          queryKey: ["subject-cos", activeSubject],
+        }),
+      ]);
+
+      setCoPreview(null);
+      setEditedCOs([]);
+      setSyllabusFile(null);
+
+      toast.success(`${saved.length} Course Outcomes saved successfully.`);
+    } catch (error) {
+      toast.error(
+        error instanceof ApiError
+          ? error.message
+          : "Could not save Course Outcomes.",
+      );
+    } finally {
+      setSavingCOs(false);
+    }
+  };
+
+  const handleExtractCOs = async () => {
+    if (!activeSubject || !syllabusFile || extractingCOs || savingCOs) return;
+
+    setExtractingCOs(true);
+    setCoPreview(null);
+    setEditedCOs([]);
+
+    try {
+      const result = await subjects.extractCOs(activeSubject, syllabusFile);
+      setCoPreview(result);
+      setEditedCOs(result.cos.map((co) => ({ ...co })));
+      toast.success(`Extracted ${result.count} Course Outcomes for review.`);
+    } catch (error) {
+      toast.error(
+        error instanceof ApiError
+          ? error.message
+          : "Could not extract Course Outcomes from the PDF.",
+      );
+    } finally {
+      setExtractingCOs(false);
+    }
+  };
+
   if (!subjectList?.length) {
     return (
       <Shell role="faculty">
@@ -232,6 +359,7 @@ function Page() {
         right={
           <select
             value={activeSubject ?? ""}
+            disabled={extractingCOs || savingCOs}
             onChange={(e) => {
               const val = e.target.value || null;
               setSubjectId(val);
@@ -239,8 +367,11 @@ function Page() {
               setSelectedModule(null);
               setSelectedFile(null);
               setUploadError(null);
+              setSyllabusFile(null);
+              setCoPreview(null);
+              setEditedCOs([]);
             }}
-            className="h-10 rounded-full border border-wine/30 bg-ivory px-4 text-sm text-wine"
+            className="h-10 rounded-full border border-wine/30 bg-ivory px-4 text-sm text-wine disabled:cursor-not-allowed disabled:opacity-50"
           >
             {subjectList.map((s) => (
               <option key={s.id} value={s.id}>
@@ -251,6 +382,122 @@ function Page() {
         }
       />
       <div className="grid grid-cols-12 gap-5">
+        {/* Syllabus PDF extraction */}
+        <Card className="col-span-12" title="Syllabus & Course Outcomes">
+          <div className="space-y-4">
+            <p className="text-sm text-muted-foreground">
+              Upload a text-based syllabus PDF (maximum 10 MB).
+              Lakshya extracts Course Outcomes and suggests Bloom taxonomy levels.
+              Review all results before saving.
+            </p>
+
+            <input
+              type="file"
+              accept=".pdf,application/pdf"
+              disabled={extractingCOs || savingCOs}
+              onChange={(event) => {
+                const file = event.target.files?.[0] ?? null;
+                setSyllabusFile(file);
+                setCoPreview(null);
+                setEditedCOs([]);
+              }}
+            />
+
+            <Btn
+              onClick={() => void handleExtractCOs()}
+              disabled={!activeSubject || !syllabusFile || extractingCOs || savingCOs}
+            >
+              {extractingCOs ? "Extracting..." : "Extract Course Outcomes"}
+            </Btn>
+
+            {coPreview && (
+              <div className="space-y-3">
+                <p className="text-sm font-semibold text-wine">
+                  {coPreview.count} Course Outcomes extracted
+                </p>
+
+                {editedCOs.map((co, index) => (
+                  <div
+                    key={co.number}
+                    className="space-y-3 rounded-xl border border-wine/15 bg-ivory/70 p-4"
+                  >
+                    <CO n={co.number} />
+
+                    <Field label="Course Outcome description">
+                      <textarea
+                        className={cn(inputCls, "w-full min-h-24")}
+                        value={co.description}
+                        onChange={(event) =>
+                          setEditedCOs((current) =>
+                            current.map((item, i) =>
+                              i === index
+                                ? { ...item, description: event.target.value }
+                                : item,
+                            ),
+                          )
+                        }
+                      />
+                    </Field>
+
+                    <Field label="Bloom taxonomy level">
+                      <select
+                        className={cn(inputCls, "w-full")}
+                        value={co.bloom_level ?? ""}
+                        onChange={(event) => {
+                          const value = event.target.value;
+                          const level = value ? Number(value) : null;
+                          const names = [
+                            "Remembering",
+                            "Understanding",
+                            "Applying",
+                            "Analyzing",
+                            "Evaluating",
+                            "Creating",
+                          ];
+                          setEditedCOs((current) =>
+                            current.map((item, i) =>
+                              i === index
+                                ? {
+                                    ...item,
+                                    bloom_level: level,
+                                    bloom_name: level ? (names[level - 1] ?? null) : null,
+                                  }
+                                : item,
+                            ),
+                          );
+                        }}
+                      >
+                        <option value="">Not assigned</option>
+                        <option value="1">1 — Remembering</option>
+                        <option value="2">2 — Understanding</option>
+                        <option value="3">3 — Applying</option>
+                        <option value="4">4 — Analyzing</option>
+                        <option value="5">5 — Evaluating</option>
+                        <option value="6">6 — Creating</option>
+                      </select>
+                    </Field>
+                  </div>
+                ))}
+
+                <p className="text-xs text-muted-foreground">
+                  Review descriptions and Bloom levels carefully.
+                  Saving updates matching CO numbers and creates new ones.
+                  Existing attainment thresholds will be preserved.
+                </p>
+
+                <Btn
+                  onClick={() => void handleSaveCOs()}
+                  disabled={savingCOs || extractingCOs || !editedCOs.length}
+                >
+                  {savingCOs
+                    ? "Saving Course Outcomes..."
+                    : "Approve & Save Course Outcomes"}
+                </Btn>
+              </div>
+            )}
+          </div>
+        </Card>
+
         {/* Upload form */}
         <Card className="col-span-12 lg:col-span-7">
           <div className="space-y-4">
@@ -595,23 +842,30 @@ function Page() {
             <div className="space-y-3">
               {moduleChunks.map((chunk) => (
                 <article
-                  key={chunk.chunk_id}
+                  key={chunk.id}
                   className="rounded-xl border border-wine/10 bg-ivory/70 p-4"
                 >
                   <div className="mb-2 flex flex-wrap items-center gap-2">
                     <span className="font-mono text-xs font-semibold text-wine">
                       Slide {chunk.slide_number}
                     </span>
-                    {chunk.co_number ? (
-                      <CO n={chunk.co_number} />
+                    {chunk.course_outcomes.length > 0 ? (
+                      chunk.course_outcomes.map((outcome) => (
+                        <span
+                          key={outcome.co_number}
+                          className="inline-flex items-center gap-2"
+                        >
+                          <CO n={outcome.co_number} />
+                          {outcome.confidence !== null && (
+                            <span className="text-xs text-muted-foreground">
+                              {(outcome.confidence * 100).toFixed(0)}% confidence
+                            </span>
+                          )}
+                        </span>
+                      ))
                     ) : (
                       <span className="rounded-full bg-beige px-2.5 py-1 text-xs text-muted-foreground">
                         Unmatched
-                      </span>
-                    )}
-                    {chunk.confidence !== null && (
-                      <span className="ml-auto text-xs text-muted-foreground">
-                        Tag confidence · {(chunk.confidence * 100).toFixed(0)}%
                       </span>
                     )}
                   </div>
