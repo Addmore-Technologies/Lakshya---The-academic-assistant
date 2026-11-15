@@ -1,11 +1,11 @@
 """Faculty-only course outcome extraction preview."""
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
-from sqlalchemy import text
 
 from ..db import get_conn
 from ..deps import require_faculty
 from ..services.co_extraction import extract_cos_from_pdf
+from .subjects import _subject_owned
 
 router = APIRouter(tags=["course-outcome-extraction"])
 
@@ -30,18 +30,7 @@ async def extract_course_outcomes(
     if not content.startswith(b"%PDF-"):
         raise HTTPException(400, "Invalid PDF file.")
 
-    faculty_id = str(faculty["id"])
-
-    subject = conn.execute(
-        text(
-            "SELECT id FROM subjects "
-            "WHERE id = :subject_id AND faculty_user_id = :faculty_id"
-        ),
-        {"subject_id": subject_id, "faculty_id": faculty_id},
-    ).fetchone()
-
-    if subject is None:
-        raise HTTPException(404, "Subject not found.")
+    _subject_owned(conn, subject_id, faculty["user_id"])
 
     try:
         cos = extract_cos_from_pdf(content)
