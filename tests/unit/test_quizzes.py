@@ -30,6 +30,9 @@ class QuizServiceTests(unittest.TestCase):
         self.faculty_user = {"user_id": "fac-1", "role": "faculty"}
         self.student_user = {"user_id": "user-s1", "role": "student", "student_id": "stud-1", "usn": "1XX23CS001"}
         self.student_user_2 = {"user_id": "user-s2", "role": "student", "student_id": "stud-2", "usn": "1XX23CS002"}
+        self.store.add_enrollment("stud-1", "cs201")
+        self.store.add_enrollment("stud-2", "cs201")
+
         self.now = datetime(2026, 10, 20, 10, 0, 0, tzinfo=timezone.utc)
 
         # Questions
@@ -229,6 +232,37 @@ class QuizServiceTests(unittest.TestCase):
         self.assertEqual(rev[0]["chosen"], 1)
         self.assertEqual(rev[0]["correct"], 1)
         self.assertEqual(rev[0]["explanation"], "Halves search space.")
+
+    def test_non_enrolled_student_cannot_start_quiz(self):
+        quiz = create_quiz(
+            self.store,
+            self.faculty_user,
+            module_id="mod-1",
+            subject_id="cs201",
+            title="Enrollment Test",
+            question_ids=["q1"],
+        )
+
+        publish_quiz(self.store, self.faculty_user, quiz.id)
+
+        non_enrolled_student = {
+            "user_id": "user-s3",
+            "role": "student",
+            "student_id": "stud-3",
+        }
+
+        with self.assertRaises(NotFoundError):
+            start_quiz_attempt(
+                self.store,
+                non_enrolled_student,
+                quiz.id,
+                now=self.now,
+            )
+
+        self.assertEqual(
+            self.store.list_attempts(quiz.id, "stud-3"),
+            [],
+        )
 
 
 if __name__ == "__main__":

@@ -123,8 +123,13 @@ function Login() {
             ))}
           </div>
           <div className="mt-6 space-y-4">
-            <Field label={tab === "student" ? "USN" : "Email or username"} error={err.id}>
+            <Field label={tab === "student" ? "USN" : "Email or username"} error={err.id} errorId="login-identity-error">
               <input
+                id="login-identity"
+                name={tab === "student" ? "usn" : "email"}
+                autoComplete={tab === "student" ? "username" : "username"}
+                aria-invalid={Boolean(err.id)}
+                aria-describedby={err.id ? "login-identity-error" : undefined}
                 value={id}
                 onChange={(e) => setId(e.target.value)}
                 placeholder={tab === "student" ? "1RV22CS018" : "meera.rao@college.edu"}
@@ -135,8 +140,13 @@ function Login() {
                 )}
               />
             </Field>
-            <Field label={tab === "student" ? "PIN" : "Password"} error={err.pw}>
+            <Field label={tab === "student" ? "PIN" : "Password"} error={err.pw} errorId="login-password-error">
               <input
+                id="login-password"
+                name={tab === "student" ? "pin" : "password"}
+                autoComplete={tab === "student" ? "current-password" : "current-password"}
+                aria-invalid={Boolean(err.pw)}
+                aria-describedby={err.pw ? "login-password-error" : undefined}
                 type="password"
                 value={pw}
                 onChange={(e) => setPw(e.target.value)}
@@ -146,7 +156,11 @@ function Login() {
             </Field>
           </div>
           {serverError && (
-            <div className="mt-2 rounded-full bg-oxblood/10 px-4 py-2 text-sm text-oxblood">
+            <div
+              className="mt-3 rounded-xl bg-oxblood/10 px-4 py-3 text-sm text-oxblood"
+              role="alert"
+              aria-live="assertive"
+            >
               {serverError}
             </div>
           )}

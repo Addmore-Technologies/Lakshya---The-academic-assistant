@@ -181,6 +181,17 @@ class PostgresQuizStore:
         if row is None:
             return None
         return self._row_to_quiz(row)
+    def is_student_enrolled(self, student_id: str, subject_id: str) -> bool:
+        row = self.conn.execute(
+            text(
+                "SELECT 1 FROM enrollments "
+                "WHERE student_id = :sid AND subject_id = :subid "
+                "LIMIT 1"
+            ),
+            {"sid": str(student_id), "subid": str(subject_id)},
+        ).fetchone()
+
+        return row is not None
 
     def list_quizzes(self, subject_id: str) -> list[QuizRecord]:
         rows = self.conn.execute(

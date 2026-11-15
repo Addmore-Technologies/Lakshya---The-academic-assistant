@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute } from "@tanstack/react-router";
-import { GripVertical, Plus, Search, Send, X } from "lucide-react";
+import { GripVertical, Plus, Search, Send, X, Save } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
 import { Toaster } from "@/components/ui/sonner";
@@ -9,6 +9,7 @@ import { Btn, Card, Chip, CO, Field, inputCls, PageHead, type Status } from "@/c
 import { cn } from "@/lib/utils";
 import { ApiError, questions, quizzes, subjects } from "@/lib/api";
 import { getStoredSubjectId, storeSubjectId } from "@/lib/subject-context";
+import { filterQuestionsForModule, validateQuizQuestionSet } from "@/lib/quiz-builder";
 import type { Question, Quiz } from "@/lib/api";
 
 export const Route = createFileRoute("/faculty/quiz-builder")({
@@ -36,6 +37,9 @@ function Page() {
   const [drag, setDrag] = useState<number | null>(null);
   const [savedQuiz, setSavedQuiz] = useState<Quiz | null>(null);
   const [savedQuizConfig, setSavedQuizConfig] = useState<string | null>(null);
+  const [questionEdits, setQuestionEdits] = useState<
+    Record<string, { co_id: string; marks: string }>
+  >({});
 
   const currentQuizConfig = () =>
     JSON.stringify({
@@ -91,19 +95,48 @@ function Page() {
     return null;
   };
 
+  const updateQuestionMappingMutation = useMutation({
+    mutationFn: async (questionId: string) => {
+      const question = questionBank?.find((item) => item.id === questionId);
+      const edit = questionEdits[questionId];
+      if (!question || !edit) throw new Error("Question changes are no longer available.");
+      const marks = Number(edit.marks);
+      if (!Number.isFinite(marks) || marks <= 0) {
+        throw new Error("Marks must be a number greater than zero.");
+      }
+      if (!allCOs.some((co) => co.id === edit.co_id)) {
+        throw new Error("Select a Course Outcome belonging to this subject.");
+      }
+      return questions.update(questionId, { co_id: edit.co_id, marks });
+    },
+    onSuccess: async (_question, questionId) => {
+      setQuestionEdits((current) => {
+        const next = { ...current };
+        delete next[questionId];
+        return next;
+      });
+      await queryClient.invalidateQueries({ queryKey: ["question-bank", activeSubject] });
+      toast.success("Question mapping and marks updated.");
+    },
+    onError: (error) => {
+      toast.error(error instanceof Error ? error.message : "Could not update question mapping.");
+    },
+  });
+
   const createMutation = useMutation({
     mutationFn: async () => {
       const moduleId = quizModule;
       if (!moduleId) throw new Error("Select a module first.");
       if (!quizTitle.trim()) throw new Error("Enter a quiz title.");
-      if (
-        picked.length !== sel.length ||
-        picked.some((question) => question.status.toLowerCase() !== "approved")
-      ) {
-        throw new Error(
-          "Only questions that are still approved can be published. Refresh the question bank and review your selection.",
-        );
+      if (picked.length !== sel.length) {
+        throw new Error("Some selected questions are no longer available. Refresh the question bank and try again.");
       }
+      const questionError = validateQuizQuestionSet(
+        picked,
+        moduleId,
+        allCOs.map((co) => co.id),
+      );
+      if (questionError) throw new Error(questionError);
       return quizzes.create({
         module_id: moduleId,
         title: quizTitle,
@@ -164,6 +197,10 @@ function Page() {
       toast.error("Add at least one question to the quiz.");
       return;
     }
+    if (Object.keys(questionEdits).length > 0) {
+      toast.error("Save or discard your pending CO mapping and marks changes before publishing.");
+      return;
+    }
     publishMutation.mutate();
   };
 
@@ -176,16 +213,24 @@ function Page() {
       toast.error("Add at least one question to the quiz.");
       return;
     }
+    if (Object.keys(questionEdits).length > 0) {
+      toast.error("Save or discard your pending CO mapping and marks changes before saving the quiz.");
+      return;
+    }
     createMutation.mutate();
   };
 
+  // A quiz is module-scoped: never mix approved questions from other modules.
+  const moduleQuestionBank = filterQuestionsForModule(questionBank ?? [], quizModule);
   const picked = sel
-    .map((id) => questionBank?.find((b) => b.id === id))
+    .map((id) => moduleQuestionBank.find((b) => b.id === id))
     .filter((q): q is Question => q !== undefined);
 
-  const perCO = allCOs.map((co) => picked.filter((p) => p.co_number === co.number).length);
+  const perCO = allCOs.map((co) =>
+    picked.filter((question) => (questionEdits[question.id]?.co_id ?? question.co_id) === co.id).length,
+  );
 
-  const filteredBank = (questionBank ?? []).filter((b) => {
+  const filteredBank = moduleQuestionBank.filter((b) => {
     const matchesSearch = b.stem.toLowerCase().includes(term.toLowerCase());
     const matchesCO = activeCO === null || b.co_number === activeCO;
     return matchesSearch && matchesCO;
@@ -245,7 +290,13 @@ function Page() {
               <select
                 className={inputCls}
                 value={quizModule}
-                onChange={(e) => setQuizModule(e.target.value)}
+                onChange={(e) => {
+                  setQuizModule(e.target.value);
+                  setSel([]);
+                  setQuestionEdits({});
+                  setSavedQuiz(null);
+                  setSavedQuizConfig(null);
+                }}
               >
                 <option value="">Select a module</option>
                 {availableModules.map((m) => (
@@ -272,6 +323,16 @@ function Page() {
               />
             </Field>
           </div>
+          {quizModule && allCOs.length === 0 && (
+            <p role="alert" className="mt-3 rounded-xl border border-warn/30 bg-warn/5 p-3 text-sm text-wine">
+              This subject has no approved Course Outcomes. Add and approve its Course Outcomes before mapping and publishing a CO-aware quiz.
+            </p>
+          )}
+          {quizModule && (
+            <p className="mt-3 text-xs text-muted-foreground">
+              Questions are restricted to the selected module. Before publishing, review each question's CO mapping and marks in the selected list.
+            </p>
+          )}
         </Card>
 
         <Card
@@ -307,7 +368,11 @@ function Page() {
           </div>
           {filteredBank.length === 0 ? (
             <p className="py-8 text-center text-sm text-muted-foreground">
-              No questions match your filters.
+              {!quizModule
+                ? "Select a module to see its approved questions."
+                : moduleQuestionBank.length === 0
+                  ? "No approved questions for this module yet. Upload its PPTX, then review and approve generated questions."
+                  : "No questions match your filters."}
             </p>
           ) : (
             filteredBank.map((b) => (
@@ -356,7 +421,11 @@ function Page() {
             title={`Selected · ${picked.length}`}
             action={
               <span className="font-mono text-xs text-muted-foreground">
-                {picked.reduce((sum, question) => sum + (question.marks ?? 1), 0)} marks
+                {picked.reduce(
+                  (sum, question) =>
+                    sum + Number(questionEdits[question.id]?.marks ?? question.marks ?? 1),
+                  0,
+                )} marks
               </span>
             }
           >
@@ -382,15 +451,78 @@ function Page() {
                 }}
                 onDragEnd={() => setDrag(null)}
                 className={cn(
-                  "mb-2 flex cursor-grab items-center gap-3 rounded-xl border border-wine/15 bg-beige/40 px-3 py-2.5",
+                  "mb-2 flex flex-wrap cursor-grab items-center gap-3 rounded-xl border border-wine/15 bg-beige/40 px-3 py-2.5",
                   drag === i && "opacity-50",
                 )}
               >
                 <GripVertical className="size-4 text-wine/50" />
                 <span className="font-mono text-xs text-wine">{i + 1}.</span>
-                <span className="flex-1 text-sm">{p.stem}</span>
-                <CO n={p.co_number} />
-                <button onClick={() => setSel(sel.filter((x) => x !== p.id))} aria-label="Remove">
+                <span className="min-w-0 flex-1 text-sm">{p.stem}</span>
+                <div className="flex flex-wrap items-center gap-2">
+                  <label className="sr-only" htmlFor={`co-map-${p.id}`}>Course Outcome for question {i + 1}</label>
+                  <select
+                    id={`co-map-${p.id}`}
+                    className="h-9 max-w-36 rounded-lg border border-wine/20 bg-background px-2 text-xs"
+                    value={questionEdits[p.id]?.co_id ?? p.co_id}
+                    disabled={updateQuestionMappingMutation.isPending}
+                    onChange={(event) => setQuestionEdits((current) => ({
+                      ...current,
+                      [p.id]: {
+                        co_id: event.target.value,
+                        marks: current[p.id]?.marks ?? String(p.marks ?? 1),
+                      },
+                    }))}
+                    aria-label={`Map question ${i + 1} to Course Outcome`}
+                  >
+                    {allCOs.map((co) => (
+                      <option key={co.id} value={co.id}>CO{co.number}</option>
+                    ))}
+                  </select>
+                  <label className="sr-only" htmlFor={`marks-${p.id}`}>Marks for question {i + 1}</label>
+                  <input
+                    id={`marks-${p.id}`}
+                    type="number"
+                    min="1"
+                    step="1"
+                    className="h-9 w-16 rounded-lg border border-wine/20 bg-background px-2 text-xs"
+                    value={questionEdits[p.id]?.marks ?? String(p.marks ?? 1)}
+                    disabled={updateQuestionMappingMutation.isPending}
+                    onChange={(event) => setQuestionEdits((current) => ({
+                      ...current,
+                      [p.id]: {
+                        co_id: current[p.id]?.co_id ?? p.co_id,
+                        marks: event.target.value,
+                      },
+                    }))}
+                    aria-label={`Marks for question ${i + 1}`}
+                  />
+                  {questionEdits[p.id] && (
+                    <>
+                      <Btn
+                        size="sm"
+                        variant="ghost"
+                        disabled={updateQuestionMappingMutation.isPending}
+                        onClick={() => setQuestionEdits((current) => {
+                          const next = { ...current };
+                          delete next[p.id];
+                          return next;
+                        })}
+                      >
+                        Cancel
+                      </Btn>
+                      <Btn
+                        size="sm"
+                        variant="secondary"
+                        disabled={updateQuestionMappingMutation.isPending}
+                        onClick={() => updateQuestionMappingMutation.mutate(p.id)}
+                      >
+                        <Save className="size-3.5" /> Save
+                      </Btn>
+                    </>
+                  )}
+                </div>
+                <button onClick={() => setSel(sel.filter((x) => x !== p.id))} aria-label="Remove question">
+
                   <X className="size-4 text-wine" />
                 </button>
               </div>

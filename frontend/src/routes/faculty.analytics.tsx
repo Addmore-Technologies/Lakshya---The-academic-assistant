@@ -1,12 +1,13 @@
 import { useQuery } from "@tanstack/react-query";
 import { createFileRoute } from "@tanstack/react-router";
 import { Download } from "lucide-react";
-import { useState } from "react";
+import { Fragment, useState } from "react";
 import { Shell } from "@/components/lk/Shell";
 import { Bar, Btn, Card, CO, PageHead } from "@/components/lk/ui";
 import { cn } from "@/lib/utils";
 import { ApiError, coSheet, subjects } from "@/lib/api";
 import { getStoredSubjectId, storeSubjectId } from "@/lib/subject-context";
+import { averageAssessedPercentages } from "@/lib/analytics-display";
 import type { COSheet, COSummaryItem, WeakCO } from "@/lib/api";
 
 export const Route = createFileRoute("/faculty/analytics")({
@@ -30,6 +31,8 @@ function Page() {
   const [moduleId, setModuleId] = useState<string | null>(null);
   const [section, setSection] = useState<string>("");
   const [error, setError] = useState<string | null>(null);
+  const [exporting, setExporting] = useState(false);
+  const [expandedStudent, setExpandedStudent] = useState<string | null>(null);
 
   const { data: subjectList } = useQuery({
     queryKey: ["subjects"],
@@ -44,6 +47,12 @@ function Page() {
     enabled: !!activeSubject,
   });
 
+  const { data: sectionSource } = useQuery<COSheet>({
+    queryKey: ["co-sheet-sections", activeSubject, scope, moduleId],
+    queryFn: () => coSheet.getSheet(activeSubject!, { scope, module_id: moduleId ?? undefined }),
+    enabled: !!activeSubject && (scope !== "module" || !!moduleId),
+  });
+
   const { data: sheets } = useQuery<COSheet>({
     queryKey: ["co-sheet", activeSubject, scope, moduleId, section],
     queryFn: () =>
@@ -52,49 +61,56 @@ function Page() {
         module_id: moduleId ?? undefined,
         section: section || undefined,
       }),
-    enabled: !!activeSubject,
+    enabled: !!activeSubject && (scope !== "module" || !!moduleId),
   });
 
   const { data: coSummary } = useQuery<COSummaryItem[]>({
     queryKey: ["co-summary", activeSubject, section],
     queryFn: () => coSheet.getSummary(activeSubject!, section || undefined),
-    enabled: !!activeSubject,
+    enabled: !!activeSubject && scope === "semester",
   });
 
   const { data: weakCOs } = useQuery<WeakCO[]>({
     queryKey: ["weak-co", activeSubject, section],
     queryFn: () => coSheet.getWeakCOs(activeSubject!, section || undefined),
-    enabled: !!activeSubject,
+    enabled: !!activeSubject && scope === "semester",
   });
 
   // ── Derived values ──────────────────────────────────────────────────
   const cols = sheets?.columns ?? [];
   const sheetRows = sheets?.rows ?? [];
 
-  const AVG = cols.map((col) => Math.round(sheets?.averages[col] ?? 0));
+  const AVG = cols.map((col) => {
+    const value = sheets?.averages[col];
+    return value === null || value === undefined ? null : Math.round(value);
+  });
 
   // Score distribution: [0-40, 40-50, 50-60, 60-70, 70-80, 80+]
+  const assessedRows = sheetRows.filter((row) => row.total_max > 0);
   const DIST = [
-    sheetRows.filter((r) => r.total_pct < 40).length,
-    sheetRows.filter((r) => r.total_pct >= 40 && r.total_pct < 50).length,
-    sheetRows.filter((r) => r.total_pct >= 50 && r.total_pct < 60).length,
-    sheetRows.filter((r) => r.total_pct >= 60 && r.total_pct < 70).length,
-    sheetRows.filter((r) => r.total_pct >= 70 && r.total_pct < 80).length,
-    sheetRows.filter((r) => r.total_pct >= 80).length,
+    assessedRows.filter((r) => r.total_pct < 40).length,
+    assessedRows.filter((r) => r.total_pct >= 40 && r.total_pct < 50).length,
+    assessedRows.filter((r) => r.total_pct >= 50 && r.total_pct < 60).length,
+    assessedRows.filter((r) => r.total_pct >= 60 && r.total_pct < 70).length,
+    assessedRows.filter((r) => r.total_pct >= 70 && r.total_pct < 80).length,
+    assessedRows.filter((r) => r.total_pct >= 80).length,
   ];
-
   const targetPct = detail?.target_attainment_pct ?? 60;
-  const avgOverall =
-    AVG.length && AVG.every((v) => v === 0)
-      ? 0
-      : Math.round(AVG.reduce((s, v) => s + v, 0) / (AVG.length || 1));
+  const thresholdForColumn = (column: string) => {
+    const number = Number(column.replace(/^CO/i, ""));
+    return detail?.cos?.find((item) => item.number === number)?.threshold_pct
+      ?? coSummary?.find((item) => item.co_number === number)?.threshold_pct
+      ?? targetPct;
+  };
+  const avgOverall = averageAssessedPercentages(AVG);
+  const availableSections = Array.from(new Set((sectionSource?.rows ?? []).map((row) => row.section).filter(Boolean))).sort();
 
-  const weakInsights = (weakCOs ?? []).slice(0, 2).map((w) => {
+  const weakInsights = (weakCOs ?? []).filter((w) => w.attainment_pct !== null).slice(0, 2).map((w) => {
     const co = detail?.cos?.find((c) => c.number === w.co_number);
     const summary = coSummary?.find((s) => s.co_number === w.co_number);
     return {
       co: w.co_number,
-      pct: w.attainment_pct ?? 0,
+      pct: w.attainment_pct as number,
       desc: co?.description ?? `CO${w.co_number}`,
       insight: summary
         ? `${summary.below} of ${summary.enrolled} students below ${summary.threshold_pct}% threshold`
@@ -104,8 +120,10 @@ function Page() {
 
   const handleExport = async () => {
     if (!activeSubject) return;
+    setExporting(true);
+    setError(null);
     try {
-      const blob = await coSheet.exportSheet(activeSubject, {
+      const { blob, filename } = await coSheet.exportSheet(activeSubject, {
         scope,
         module_id: moduleId ?? undefined,
         section: section || undefined,
@@ -113,12 +131,17 @@ function Page() {
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = `co_sheet.xlsx`;
+      const safeCode = (detail?.code ?? "subject").replace(/[^a-zA-Z0-9_-]/g, "") || "subject";
+      a.download = filename ?? `co_sheet_${safeCode}.xlsx`;
+      document.body.appendChild(a);
       a.click();
-      URL.revokeObjectURL(url);
+      a.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
     } catch (e) {
       if (e instanceof ApiError) setError(e.message);
       else setError("Export failed.");
+    } finally {
+      setExporting(false);
     }
   };
 
@@ -126,17 +149,6 @@ function Page() {
     return (
       <Shell role="faculty">
         <PageHead eyebrow="Faculty" title="Analytics" sub="No subjects assigned." />
-      </Shell>
-    );
-  }
-
-  if (error) {
-    return (
-      <Shell role="faculty">
-        <PageHead eyebrow="Analytics" title="CO sheet" />
-        <div className="py-12 text-center">
-          <p className="text-wine">{error}</p>
-        </div>
       </Shell>
     );
   }
@@ -156,6 +168,7 @@ function Page() {
                   setSubjectId(val);
                   if (val) storeSubjectId(val);
                   setModuleId(null);
+                  setSection("");
                 }}
                 className="h-10 rounded-full border border-wine/30 bg-ivory px-4 text-sm text-wine"
               >
@@ -178,6 +191,7 @@ function Page() {
                   onClick={() => {
                     setScope(val);
                     setModuleId(null);
+                    setSection("");
                   }}
                   className={cn(
                     "rounded-full px-4 py-1.5 text-sm",
@@ -191,7 +205,7 @@ function Page() {
             {scope === "module" && (
               <select
                 value={moduleId ?? ""}
-                onChange={(e) => setModuleId(e.target.value || null)}
+                onChange={(e) => { setModuleId(e.target.value || null); setSection(""); }}
                 className="h-10 rounded-full border border-wine/30 bg-ivory px-4 text-sm text-wine"
               >
                 <option value="">Select module</option>
@@ -208,14 +222,16 @@ function Page() {
               className="h-10 rounded-full border border-wine/30 bg-ivory px-4 text-sm text-wine"
             >
               <option value="">All sections</option>
+              {availableSections.map((value) => <option key={value} value={value}>{value}</option>)}
             </select>
-            <Btn variant="secondary" onClick={handleExport}>
+            <Btn variant="secondary" onClick={handleExport} disabled={exporting || (scope === "module" && !moduleId)}>
               <Download className="size-4" />
-              Export to Excel
+              {exporting ? "Preparing…" : "Export to Excel"}
             </Btn>
           </div>
         }
       />
+      {error && <div role="alert" className="mb-4 rounded-xl border border-wine/20 bg-wine/5 px-4 py-3 text-sm text-wine">{error}</div>}
       <div className="grid grid-cols-12 gap-5">
         <Card className="col-span-7" title="Average score by CO">
           {cols.length === 0 ? (
@@ -225,26 +241,12 @@ function Page() {
           ) : (
             <>
               <div className="relative flex h-56 items-end gap-5 border-b border-wine/20 pl-3">
-                <div
-                  className="absolute inset-x-0 border-t-2 border-dashed border-oxblood/70"
-                  style={{ bottom: `${targetPct}%` }}
-                />
                 {AVG.map((v, i) => (
-                  <div
-                    key={i}
-                    className="relative flex flex-1 flex-col items-center justify-end"
-                    style={{ height: "100%" }}
-                  >
+                  <div key={i} className="relative flex flex-1 flex-col items-center justify-end" style={{ height: "100%" }}>
                     <div className="absolute -top-2 rounded-md bg-oxblood px-2 py-1 font-mono text-[11px] text-ivory">
-                      {v}%
+                      {v === null ? "N/A" : `${v}%`}
                     </div>
-                    <div
-                      className={cn(
-                        "w-full rounded-t-lg transition",
-                        v < targetPct ? "bg-wine" : "bg-dusty",
-                      )}
-                      style={{ height: `${Math.max(v, 1)}%` }}
-                    />
+                    {v !== null && <div className={cn("w-full rounded-t-lg transition", v < targetPct ? "bg-wine" : "bg-dusty")} style={{ height: `${Math.max(v, 1)}%` }} />}
                   </div>
                 ))}
               </div>
@@ -266,10 +268,7 @@ function Page() {
               <span className="size-2.5 rounded-sm bg-wine" />
               Below target
             </span>
-            <span className="flex items-center gap-1.5">
-              <span className="h-0 w-4 border-t-2 border-dashed border-oxblood" />
-              Target {targetPct}%
-            </span>
+            <span className="text-xs">Each CO uses its configured threshold shown below.</span>
           </div>
         </Card>
 
@@ -303,10 +302,11 @@ function Page() {
         </Card>
 
         <Card className="col-span-12 !p-0 overflow-hidden">
-          <table className="w-full text-sm">
+          <div className="overflow-x-auto">
+          <table className="w-full min-w-[760px] text-sm">
             <thead className="bg-wine text-ivory">
               <tr>
-                {["USN", "Name", ...cols, "Total"].map((h, i) => (
+                {["USN", "Name", ...cols, "Total", "Status"].map((h, i) => (
                   <th
                     key={h}
                     className={cn("px-4 py-3 font-medium", i < 2 ? "text-left" : "text-right")}
@@ -318,7 +318,8 @@ function Page() {
             </thead>
             <tbody>
               {sheetRows.map((r) => (
-                <tr key={r.usn} className="border-b border-wine/10 even:bg-beige/30">
+                <Fragment key={r.usn}>
+                <tr className="border-b border-wine/10 even:bg-beige/30">
                   <td className="px-4 py-3 font-mono text-xs">{r.usn}</td>
                   <td className="px-4 py-3">{r.name}</td>
                   {cols.map((col) => {
@@ -329,18 +330,28 @@ function Page() {
                         <span
                           className={cn(
                             "rounded px-1.5 py-0.5",
-                            !isNull && score < targetPct && "bg-wine/10 font-semibold text-wine",
+                            !isNull && score < thresholdForColumn(col) && "bg-wine/10 font-semibold text-wine",
                           )}
                         >
-                          {isNull ? "—" : score}
+                          {isNull ? "Not assessed" : `${Math.round(score)}%`}
                         </span>
                       </td>
                     );
                   })}
                   <td className="px-4 py-3 text-right font-mono font-semibold">
-                    {Math.round(r.total_pct)}
+                    {r.total_max > 0 ? `${Math.round(r.total_pct)}%` : "—"}
+                  </td>
+                  <td className="px-4 py-3 text-right text-xs">{r.total_max > 0 ? "Assessed" : "Not assessed"}</td>
+                </tr>
+                <tr className="border-b border-wine/10 bg-beige/20">
+                  <td colSpan={2 + cols.length + 2} className="px-4 py-2 text-right">
+                    <button className="text-xs font-semibold text-wine underline" onClick={() => setExpandedStudent(expandedStudent === r.usn ? null : r.usn)}>
+                      {expandedStudent === r.usn ? "Hide details" : "View CO breakdown"}
+                    </button>
+                    {expandedStudent === r.usn && <div className="mt-2 flex flex-wrap justify-end gap-3 text-xs">{cols.map((col) => <span key={col}>{col}: {r.co_scores[col] == null ? "Not assessed" : `${Math.round(r.co_scores[col])}%`}</span>)}</div>}
                   </td>
                 </tr>
+                </Fragment>
               ))}
               <tr className="bg-dusty/40 font-medium">
                 <td className="px-4 py-3 eyebrow !text-oxblood" colSpan={2}>
@@ -349,18 +360,43 @@ function Page() {
                 {AVG.map((v, i) => (
                   <td
                     key={i}
-                    className={cn("px-4 py-3 text-right font-mono", v < targetPct && "text-wine")}
+                    className={cn("px-4 py-3 text-right font-mono", v !== null && v < thresholdForColumn(cols[i] ?? "") && "text-wine")}
                   >
-                    {v}
+                    {v === null ? "Not assessed" : `${v}%`}
                   </td>
                 ))}
-                <td className="px-4 py-3 text-right font-mono">{avgOverall}</td>
+                <td className="px-4 py-3 text-right font-mono">{avgOverall === null ? "—" : `${avgOverall}%`}</td>
+                <td className="px-4 py-3" />
               </tr>
             </tbody>
           </table>
+          </div>
         </Card>
 
-        {weakInsights.map((w) => (
+        <Card className="col-span-12" title="CO attainment summary">
+          {scope === "module" ? (
+            <p className="text-sm text-muted-foreground">The current backend summary endpoint reports semester-level attainment only. Module-level CO scores are shown in the table above.</p>
+          ) : (
+          <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
+            {(coSummary ?? []).map((item) => {
+              const co = detail?.cos?.find((candidate) => candidate.number === item.co_number);
+              const assessed = item.average !== null && item.attempted > 0;
+              return (
+                <div key={item.co_number} className="rounded-xl border border-wine/15 p-4">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="flex items-center gap-2"><CO n={item.co_number} /><span className="text-sm font-medium">{co?.description ?? `CO${item.co_number}`}</span></div>
+                    <span className="font-mono text-sm">{assessed ? `${Math.round(item.average as number)}%` : "Not assessed"}</span>
+                  </div>
+                  <p className="mt-2 text-xs text-muted-foreground">{item.attempted} of {item.enrolled} students assessed · threshold {item.threshold_pct}% · target {item.target_pct}%</p>
+                  {assessed && <p className={cn("mt-2 text-xs font-semibold", item.met ? "text-success" : "text-wine")}>{item.met ? "Threshold met" : `${item.below} students below threshold`}</p>}
+                </div>
+              );
+            })}
+          </div>
+          )}
+        </Card>
+
+        {scope === "semester" && weakInsights.map((w) => (
           <div key={w.co} className="paper-wine col-span-6 p-6">
             <div className="flex items-center gap-3">
               <CO n={w.co} className="!bg-ivory !text-wine" />

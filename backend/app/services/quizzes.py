@@ -132,6 +132,8 @@ class QuizStore(Protocol):
 
     def get_quiz(self, quiz_id: str) -> QuizRecord | None: ...
 
+    def is_student_enrolled(self, student_id: str, subject_id: str) -> bool: ...
+
     def list_quizzes(self, subject_id: str) -> list[QuizRecord]: ...
 
     def get_question(self, question_id: str) -> QuestionRecord | None: ...
@@ -159,6 +161,14 @@ class InMemoryQuizStore:
         self.questions: dict[str, QuestionRecord] = {}
         self.attempts: dict[str, QuizAttemptRecord] = {}
         self.co_scores: dict[str, StudentCOScoreRecord] = {}
+
+        self.enrollments: set[tuple[str, str]] = set()
+
+    def add_enrollment(self, student_id: str, subject_id: str) -> None:
+        self.enrollments.add((student_id, subject_id))
+
+    def is_student_enrolled(self, student_id: str, subject_id: str) -> bool:
+        return (student_id, subject_id) in self.enrollments
 
     def save_quiz(self, quiz: QuizRecord) -> QuizRecord:
         self.quizzes[quiz.id] = quiz
@@ -373,6 +383,9 @@ def start_quiz_attempt(
 
     quiz = store.get_quiz(quiz_id)
     if not quiz:
+        raise NotFoundError("Quiz not found.")
+
+    if not store.is_student_enrolled(student_id, quiz.subject_id):
         raise NotFoundError("Quiz not found.")
 
     if not quiz.published:

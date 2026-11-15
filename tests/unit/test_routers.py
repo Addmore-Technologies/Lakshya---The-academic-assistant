@@ -80,6 +80,7 @@ class RouterHandlerTests(unittest.TestCase):
     # --- 2. Quiz Router ---
     def test_quiz_router_handlers(self):
         quiz_store = InMemoryQuizStore()
+        quiz_store.add_enrollment("stud-1", "cs201")
         cal_store = InMemoryCalendarStore()
         handler = QuizRouterHandler(quiz_store=quiz_store, calendar_store=cal_store)
 

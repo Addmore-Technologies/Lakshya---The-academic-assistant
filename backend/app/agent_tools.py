@@ -298,11 +298,34 @@ def generate_quiz(
     co_id = str(args.co_id)
     co_number = mod_row["co_number"]
 
-    # Build the module / CO objects that Danwin's function expects
+    # Retrieve slide content tagged to the selected Course Outcome.
+    from backend.app.pg.chunks import module_chunks_with_co
+
+    module_chunks = module_chunks_with_co(conn, module_id)
+
+    matching_chunks = [
+        chunk for chunk in module_chunks
+        if chunk["co_id"] == co_id and chunk["text"].strip()
+    ]
+
+    if not matching_chunks:
+        raise AppError(
+            422,
+            "NO_TAGGED_CONTENT",
+            "No slides are tagged to this Course Outcome. "
+            "Upload and process a PPTX before generating questions."
+        )
+
+    slide_context = "\n\n".join(
+        f"Slide {chunk['slide_number']}: {chunk['text']}"
+        for chunk in matching_chunks
+    )
+
+    # Supply the actual CO-tagged slide content to the AI generator.
     module_obj = SimpleNamespace(
         id=module_id,
         title=mod_row["title"] or "",
-        description="",
+        description=slide_context,
     )
     co_obj = SimpleNamespace(
         id=co_id,

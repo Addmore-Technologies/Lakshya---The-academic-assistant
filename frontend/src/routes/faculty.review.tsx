@@ -7,7 +7,7 @@ import { Toaster } from "@/components/ui/sonner";
 import { Shell } from "@/components/lk/Shell";
 import { Btn, Card, Chip, CO, Field, inputCls, PageHead, type Status } from "@/components/lk/ui";
 import { cn } from "@/lib/utils";
-import { ApiError, questions, subjects } from "@/lib/api";
+import { agent, ApiError, questions, subjects } from "@/lib/api";
 import { getStoredSubjectId, storeSubjectId } from "@/lib/subject-context";
 import type { Question, SubjectDetail } from "@/lib/api";
 
@@ -33,8 +33,9 @@ function Page() {
   const [sourceFilter, setSourceFilter] = useState<"All" | "AI" | "Faculty">("All");
   const [coFilter, setCoFilter] = useState<number | null>(null);
   const [genModule, setGenModule] = useState<string>("");
-  const [genCO, setGenCO] = useState<number | null>(null);
-  const [genCount, setGenCount] = useState("10");
+  const [genCO, setGenCO] = useState<string>("");
+  const [genCount, setGenCount] = useState("5");
+  const [genDifficulty, setGenDifficulty] = useState<"easy" | "medium" | "hard">("medium");
   const [moduleFilter, setModuleFilter] = useState<string>("All");
   const [difficultyFilter, setDifficultyFilter] = useState<string>("All");
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -42,6 +43,8 @@ function Page() {
   const [editOptions, setEditOptions] = useState<string[]>([]);
   const [editCorrect, setEditCorrect] = useState(0);
   const [editExplanation, setEditExplanation] = useState("");
+  const [editMarks, setEditMarks] = useState("1");
+  const [editCOId, setEditCOId] = useState("");
 
   const { data: subjectList } = useQuery({
     queryKey: ["subjects"],
@@ -74,6 +77,42 @@ function Page() {
       return results.flat();
     },
     enabled: !!activeSubject && availableModules.length > 0,
+  });
+
+  const generateMutation = useMutation({
+    mutationFn: async () => {
+      const count = Number(genCount);
+      if (!genModule || !genCO) throw new Error("Select a module and Course Outcome.");
+      if (!Number.isInteger(count) || count < 1 || count > 20) {
+        throw new Error("Choose between 1 and 20 questions.");
+      }
+      const module = availableModules.find((item) => item.id === genModule);
+      const co = allCOs.find((item) => item.id === genCO);
+      if (!module || !co) throw new Error("The selected module or Course Outcome is no longer available.");
+      const message = [
+        "Use the generate_quiz tool exactly once with these exact arguments.",
+        `module_id: ${genModule}`,
+        `co_id: ${genCO}`,
+        `difficulty: ${genDifficulty}`,
+        `count: ${count}`,
+        "Do not ask follow-up questions. Do not invent IDs. After the tool completes, briefly report the result.",
+      ].join("\n");
+      const result = await agent.chat(message);
+      const generated = result.tool_calls.some(
+        (call) => call.name === "generate_quiz" && call.status === "draft_review",
+      );
+      if (!generated) {
+        throw new Error(result.reply || "The AI agent did not generate question drafts. Check that AI services are configured.");
+      }
+      return result;
+    },
+    onSuccess: async (result) => {
+      await queryClient.invalidateQueries({ queryKey: ["review-questions", activeSubject] });
+      toast.success("AI question drafts generated. Review and approve them before adding them to a quiz.");
+    },
+    onError: (error) => {
+      toast.error(error instanceof Error ? error.message : "Could not generate AI question drafts.");
+    },
   });
 
   const approveMutation = useMutation({
@@ -111,6 +150,8 @@ function Page() {
         options: editOptions.map((option) => option.trim()),
         correct_option: editCorrect,
         explanation: editExplanation.trim(),
+        marks: Number(editMarks),
+        co_id: editCOId,
       }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["review-questions", activeSubject] });
@@ -129,6 +170,8 @@ function Page() {
     setEditOptions([...q.options]);
     setEditCorrect(q.correct_option);
     setEditExplanation(q.explanation ?? "");
+    setEditMarks(String(q.marks ?? 1));
+    setEditCOId(q.co_id);
   };
 
   const set = (id: string, s: Status) => {
@@ -198,6 +241,53 @@ function Page() {
           </Btn>
         }
       />
+      <Card className="mb-5" title="Generate AI question drafts">
+        <div className="space-y-3">
+          <p className="text-sm text-muted-foreground">
+            Generate draft questions from processed slide content tagged to one approved Course Outcome. Generated questions are never published automatically; review, edit and approve them below.
+          </p>
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
+            <Field label="Module">
+              <select className={inputCls} value={genModule} onChange={(e) => setGenModule(e.target.value)}>
+                <option value="">Select module</option>
+                {availableModules.map((module) => (
+                  <option key={module.id} value={module.id}>M{module.number} · {module.title}</option>
+                ))}
+              </select>
+            </Field>
+            <Field label="Course Outcome">
+              <select className={inputCls} value={genCO} onChange={(e) => setGenCO(e.target.value)}>
+                <option value="">Select approved CO</option>
+                {allCOs.map((co) => (
+                  <option key={co.id} value={co.id}>CO{co.number} · {co.description}</option>
+                ))}
+              </select>
+            </Field>
+            <Field label="Difficulty">
+              <select className={inputCls} value={genDifficulty} onChange={(e) => setGenDifficulty(e.target.value as "easy" | "medium" | "hard")}>
+                <option value="easy">Easy</option>
+                <option value="medium">Medium</option>
+                <option value="hard">Hard</option>
+              </select>
+            </Field>
+            <Field label="Number of questions (1–20)">
+              <input className={inputCls} type="number" min="1" max="20" step="1" value={genCount} onChange={(e) => setGenCount(e.target.value)} />
+            </Field>
+          </div>
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <p className="text-xs text-muted-foreground">
+              Requires a processed PPTX with slides tagged to the selected CO. If no tagged slides exist, the backend will explain why generation cannot proceed.
+            </p>
+            <Btn
+              onClick={() => generateMutation.mutate()}
+              disabled={generateMutation.isPending || !genModule || !genCO || !allCOs.length}
+            >
+              <Sparkle className="size-4" />
+              {generateMutation.isPending ? "Generating drafts…" : "Generate question drafts"}
+            </Btn>
+          </div>
+        </div>
+      </Card>
       <div className="grid grid-cols-12 gap-5">
         <div className="col-span-12 lg:col-span-8 space-y-4">
           {/* Filters */}
@@ -319,6 +409,10 @@ function Page() {
                     {q.difficulty && (
                       <span className="text-[11px] text-muted-foreground">{q.difficulty}</span>
                     )}
+                    {q.bloom_level && (
+                      <span className="text-[11px] text-muted-foreground">Bloom: {q.bloom_level}</span>
+                    )}
+                    <span className="text-[11px] text-muted-foreground">{q.marks ?? 1} mark(s)</span>
                     <div className="flex-1" />
                     <Chip s={displayStatus(q.status)} />
                   </div>
@@ -367,6 +461,29 @@ function Page() {
                           </Field>
                         ))}
                       </div>
+                      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                        <Field label="Course Outcome mapping">
+                          <select
+                            className={inputCls}
+                            value={editCOId}
+                            onChange={(e) => setEditCOId(e.target.value)}
+                          >
+                            {allCOs.map((co) => (
+                              <option key={co.id} value={co.id}>CO{co.number} · {co.description}</option>
+                            ))}
+                          </select>
+                        </Field>
+                        <Field label="Marks">
+                          <input
+                            type="number"
+                            min="1"
+                            step="1"
+                            className={inputCls}
+                            value={editMarks}
+                            onChange={(e) => setEditMarks(e.target.value)}
+                          />
+                        </Field>
+                      </div>
                       <Field label="Correct option">
                         <select
                           className={inputCls}
@@ -397,6 +514,9 @@ function Page() {
                           disabled={
                             updateMutation.isPending ||
                             !editStem.trim() ||
+                            !editCOId ||
+                            !Number.isFinite(Number(editMarks)) ||
+                            Number(editMarks) <= 0 ||
                             editOptions.length < 2 ||
                             editOptions.some((option) => !option.trim())
                           }
@@ -457,60 +577,6 @@ function Page() {
               ))}
             </div>
 
-            <div className="stripes-blue rounded-[1.25rem] p-2">
-              <Card className="!shadow-none" title="Generate questions">
-                <div className="space-y-3">
-                  <Field label="Module">
-                    <select
-                      className={inputCls}
-                      value={genModule}
-                      onChange={(e) => setGenModule(e.target.value)}
-                    >
-                      <option value="">Select module</option>
-                      {availableModules.map((m) => (
-                        <option key={m.id} value={m.id}>
-                          M{m.number} — {m.title}
-                        </option>
-                      ))}
-                    </select>
-                  </Field>
-                  <Field label="Course outcome">
-                    <select
-                      className={inputCls}
-                      value={genCO ?? ""}
-                      onChange={(e) => setGenCO(e.target.value ? Number(e.target.value) : null)}
-                    >
-                      <option value="">Select CO</option>
-                      {allCOs.map((co) => (
-                        <option key={co.id} value={co.number}>
-                          CO{co.number} — {co.description}
-                        </option>
-                      ))}
-                    </select>
-                  </Field>
-                  <Field label="Count">
-                    <input
-                      type="number"
-                      defaultValue={10}
-                      value={genCount}
-                      onChange={(e) => setGenCount(e.target.value)}
-                      className={inputCls}
-                    />
-                  </Field>
-                  <Btn
-                    className="w-full"
-                    onClick={() =>
-                      toast(
-                        `AI generation coming soon — selected ${genCount} questions for ${genModule ? "module" : "subject"}`,
-                      )
-                    }
-                  >
-                    <Sparkle className="size-4" />
-                    Generate
-                  </Btn>
-                </div>
-              </Card>
-            </div>
           </div>
         </div>
       </div>

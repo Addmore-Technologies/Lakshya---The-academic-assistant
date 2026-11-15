@@ -269,3 +269,23 @@ def test_request_tool_call_budget_rejects_the_next_batch():
     assert result.loop_limited is True
     assert result.tool_calls[-1] == {"name": "batch", "status": "call_limit_exceeded"}
     assert "tool-call limit" in result.reply.lower()
+
+
+def test_faculty_prompt_instructs_authorized_quiz_generation():
+    from ai.agent import system_prompt_for_role
+
+    prompt = system_prompt_for_role("faculty")
+
+    assert "call the generate_quiz tool" in prompt
+    assert "authorize saving drafts" in prompt
+    assert "immediately saves draft questions" in prompt
+    assert "do not publish them" in prompt
+
+
+def test_faculty_prompt_respects_no_save_requests():
+    from ai.agent import system_prompt_for_role
+
+    prompt = system_prompt_for_role("faculty")
+
+    assert "If faculty request a preview or say not to save or execute" in prompt
+    assert "do not call generate_quiz" in prompt
