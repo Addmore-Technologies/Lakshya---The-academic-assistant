@@ -21,8 +21,18 @@ STOP_LINE = re.compile(
 )
 
 
+BLOOM_LEVELS = {
+    "remembering": 1,
+    "understanding": 2,
+    "applying": 3,
+    "analyzing": 4,
+    "evaluating": 5,
+    "creating": 6,
+}
+
+
 def extract_cos_from_text(text: str) -> list[dict]:
-    """Extract CO1-CO6, including multiline descriptions."""
+    """Extract CO1-CO6, including multiline and table-formatted descriptions."""
     results: dict[int, dict] = {}
     lines = text.splitlines()
 
@@ -55,12 +65,31 @@ def extract_cos_from_text(text: str) -> list[dict]:
 
             parts.append(candidate)
 
-        description = " ".join(parts).strip()
+        combined = " ".join(parts)
+        cells = [cell.strip() for cell in combined.split("|") if cell.strip()]
+
+        bloom_level = None
+        bloom_name = None
+        description_parts = []
+
+        for cell in cells:
+            normalized = cell.lower().strip(" .:-")
+            if normalized in BLOOM_LEVELS:
+                bloom_name = normalized.capitalize()
+                bloom_level = BLOOM_LEVELS[normalized]
+            elif normalized.isdigit() and bloom_name:
+                continue
+            else:
+                description_parts.append(cell)
+
+        description = " ".join(description_parts).strip()
 
         if description:
             results[number] = {
                 "number": number,
                 "description": description,
+                "bloom_level": bloom_level,
+                "bloom_name": bloom_name,
                 "threshold_pct": 60,
                 "target_attainment_pct": 60,
             }
