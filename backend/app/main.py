@@ -1,3 +1,4 @@
+from .routers import co_extraction
 
 import sys
 from pathlib import Path
@@ -108,3 +109,5 @@ app.add_event_handler(
     "shutdown",
     lambda: close_agent_runtime(app),
 )
+
+app.include_router(co_extraction.router)
