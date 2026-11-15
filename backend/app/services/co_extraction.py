@@ -22,9 +22,8 @@ STOP_LINE = re.compile(
 
 
 def extract_cos_from_text(text: str) -> list[dict]:
-    """Return CO numbers and descriptions found in course-plan text."""
+    """Extract CO1-CO6, including multiline descriptions."""
     results: dict[int, dict] = {}
-
     lines = text.splitlines()
 
     for index, line in enumerate(lines):
@@ -35,22 +34,30 @@ def extract_cos_from_text(text: str) -> list[dict]:
             continue
 
         number = int(match.group(1))
-        if number > 6:
+        if number > 6 or number in results:
             continue
 
-        description = stripped[match.end():].strip(" :-–|")
+        parts = []
+        first = stripped[match.end():].strip(" :-–|")
+        if first:
+            parts.append(first)
 
-        if not description:
-            for next_line in lines[index + 1:index + 4]:
-                candidate = next_line.strip()
-                if not candidate:
-                    continue
-                if CO_START.match(candidate) or STOP_LINE.match(candidate):
+        for next_line in lines[index + 1:]:
+            candidate = next_line.strip()
+
+            if not candidate:
+                if parts:
                     break
-                description = candidate
+                continue
+
+            if CO_START.match(candidate) or STOP_LINE.match(candidate):
                 break
 
-        if description and number not in results:
+            parts.append(candidate)
+
+        description = " ".join(parts).strip()
+
+        if description:
             results[number] = {
                 "number": number,
                 "description": description,
