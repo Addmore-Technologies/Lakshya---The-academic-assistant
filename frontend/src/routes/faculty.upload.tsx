@@ -133,7 +133,7 @@ function Page() {
       queryClient.invalidateQueries({ queryKey: ["subject-detail", activeSubject] });
       setSelectedModule(res.module_id);
       setIsUploading(false);
-      toast.success("Slides uploaded — processing in background.");
+      toast.success("Material uploaded — processing in background.");
     },
     onError: (e) => {
       setIsUploading(false);
@@ -144,7 +144,7 @@ function Page() {
 
   const handleUpload = async () => {
     if (!selectedFile) {
-      toast.error("Please select a .pptx file first.");
+      toast.error("Please select a PDF, PPT, or PPTX file first.");
       return;
     }
     if (![".pdf", ".ppt", ".pptx"].some(ext => selectedFile.name.toLowerCase().endsWith(ext))) {
@@ -176,7 +176,7 @@ function Page() {
       }
     }
 
-    // Upload PPTX
+    // Upload PDF, PPT, or PPTX
     setIsUploading(true);
     const formData = new FormData();
     formData.append("file", selectedFile);
@@ -627,10 +627,10 @@ function Page() {
               />
               <UploadCloud className="size-10 text-wine" strokeWidth={1.3} />
               <div className="mt-3 font-serif text-2xl text-wine">
-                {selectedFile?.name || "Drop your PPT here"}
+                {selectedFile?.name || "Drop your PDF or presentation here"}
               </div>
               <div className="text-sm text-muted-foreground">
-                or click to browse · .pptx up to 25 MB
+                or click to browse · PDF, PPT, PPTX up to 25 MB
               </div>
             </div>
           </div>
