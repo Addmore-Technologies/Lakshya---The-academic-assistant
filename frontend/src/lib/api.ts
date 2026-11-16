@@ -928,7 +928,7 @@ export const attempts = {
 
 export const upload = {
   /**
-   * Upload a .pptx deck for a module.
+   * Upload a PDF, PPT, or PPTX document for a module.
    * Pass a FormData with a `file` field, or a Blob/File directly.
    */
   uploadModule(

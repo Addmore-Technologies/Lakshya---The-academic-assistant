@@ -154,3 +154,64 @@ def extract_cos_from_pdf(file_bytes: bytes) -> list[dict]:
         )
 
     return extract_cos_from_text(text)
+
+
+def extract_cos_from_pptx(file_bytes: bytes) -> list[dict]:
+    """Extract course outcomes from PowerPoint slide text."""
+    from ..pipeline.ppt import parse_pptx
+
+    deck = parse_pptx(io.BytesIO(file_bytes))
+
+    if not deck.chunks:
+        raise ValueError(
+            "No extractable text found in the PowerPoint file."
+        )
+
+    text = "\n".join(chunk.text for chunk in deck.chunks)
+
+    return extract_cos_from_text(text)
+
+
+def extract_cos_from_jpg(file_bytes: bytes) -> list[dict]:
+    """Extract course outcomes from a JPG image using OCR."""
+    import pytesseract
+    from PIL import Image, UnidentifiedImageError
+
+    try:
+        image = Image.open(io.BytesIO(file_bytes))
+        image.verify()
+
+        image = Image.open(io.BytesIO(file_bytes))
+        if image.format != "JPEG":
+            raise ValueError("The uploaded file is not a valid JPG image.")
+
+        image = image.convert("RGB")
+
+        text = pytesseract.image_to_string(
+            image,
+            config="--psm 6",
+        )
+
+    except pytesseract.TesseractNotFoundError as exc:
+        raise ValueError(
+            "OCR engine is not installed on the server."
+        ) from exc
+    except (UnidentifiedImageError, OSError) as exc:
+        raise ValueError(
+            "Could not read the JPG image."
+        ) from exc
+
+    if not text.strip():
+        raise ValueError(
+            "No readable text found in the JPG image."
+        )
+
+    return extract_cos_from_text(text)
+
+
+def extract_cos_from_ppt(file_bytes: bytes) -> list[dict]:
+    """Extract COs from legacy PPT files after converting to PPTX."""
+    from .ppt_conversion import convert_ppt_to_pptx
+
+    converted_bytes = convert_ppt_to_pptx(file_bytes)
+    return extract_cos_from_pptx(converted_bytes)

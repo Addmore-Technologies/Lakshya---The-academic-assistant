@@ -142,11 +142,13 @@ function Page() {
 
   const handleUpload = async () => {
     if (!selectedFile) {
-      toast.error("Please select a .pptx file first.");
+      toast.error("Please select a PDF, PPT, or PPTX file first.");
       return;
     }
-    if (!selectedFile.name.toLowerCase().endsWith(".pptx")) {
-      toast.error("Only .pptx files are supported.");
+    if (![".pdf", ".ppt", ".pptx"].some(
+      (ext) => selectedFile.name.toLowerCase().endsWith(ext)
+    )) {
+      toast.error("Only PDF, PPT, and PPTX files are supported.");
       return;
     }
 
@@ -171,7 +173,7 @@ function Page() {
       }
     }
 
-    // Upload PPTX
+    // Upload PDF, PPT, or PPTX
     setIsUploading(true);
     const formData = new FormData();
     formData.append("file", selectedFile);
@@ -382,18 +384,18 @@ function Page() {
         }
       />
       <div className="grid grid-cols-12 gap-5">
-        {/* Syllabus PDF extraction */}
+        {/* Syllabus CO extraction */}
         <Card className="col-span-12" title="Syllabus & Course Outcomes">
           <div className="space-y-4">
             <p className="text-sm text-muted-foreground">
-              Upload a text-based syllabus PDF (maximum 10 MB).
+              Upload a syllabus PDF, PPT, PPTX, JPG, or JPEG (maximum 10 MB).
               Lakshya extracts Course Outcomes and suggests Bloom taxonomy levels.
               Review all results before saving.
             </p>
 
             <input
               type="file"
-              accept=".pdf,application/pdf"
+              accept=".pdf,.ppt,.pptx,.jpg,.jpeg"
               disabled={extractingCOs || savingCOs}
               onChange={(event) => {
                 const file = event.target.files?.[0] ?? null;
@@ -552,7 +554,7 @@ function Page() {
             >
               <input
                 type="file"
-                accept=".pptx"
+                accept=".pdf,.ppt,.pptx"
                 ref={fileInputRef}
                 className="hidden"
                 onChange={(e) => setSelectedFile(e.target.files?.[0] ?? null)}
@@ -562,7 +564,7 @@ function Page() {
                 {selectedFile?.name || "Drop your PPT here"}
               </div>
               <div className="text-sm text-muted-foreground">
-                or click to browse · .pptx up to 25 MB
+                or click to browse · PDF, PPT, PPTX up to 25 MB
               </div>
             </div>
           </div>
@@ -801,7 +803,7 @@ function Page() {
                         setIsUploading(false);
                       }
                     } else {
-                      toast.error("Please select a .pptx file to retry.");
+                      toast.error("Please select a PDF, PPT, or PPTX file to retry.");
                     }
                   }}
                 >
