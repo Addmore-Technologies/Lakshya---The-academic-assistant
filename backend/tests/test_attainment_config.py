@@ -1,6 +1,7 @@
 """Tests for faculty-configurable CO attainment percentages."""
 
 import math
+from decimal import Decimal
 
 import pytest
 
@@ -9,7 +10,7 @@ from backend.app.engine.attainment_config import validate_percentage
 
 @pytest.mark.parametrize(
     "value",
-    [0, 25, 60, 75.5, 100],
+    [0, 25, 60, 75.5, 100, Decimal("0"), Decimal("60.5"), Decimal("100")],
 )
 def test_accepts_valid_percentages(value):
     assert validate_percentage(value, "threshold_pct") == float(value)
@@ -29,6 +30,11 @@ def test_accepts_valid_percentages(value):
         float("nan"),
         float("inf"),
         -float("inf"),
+        Decimal("-1"),
+        Decimal("100.1"),
+        Decimal("NaN"),
+        Decimal("Infinity"),
+        Decimal("-Infinity"),
     ],
 )
 def test_rejects_invalid_percentages(value):

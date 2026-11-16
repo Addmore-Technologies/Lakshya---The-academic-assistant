@@ -13,8 +13,12 @@
 // ── Environment ─────────────────────────────────────────────────────────
 
 /** Backend API origin.  Read from VITE_API_URL, falling back to Render. */
-export const BASE_URL: string =
-  import.meta.env.VITE_API_URL ?? "https://lakshya-the-academic-assistant.onrender.com";
+const configuredApiUrl = import.meta.env.VITE_API_URL?.trim();
+
+/** Backend API origin. Trailing slashes are removed to keep request URLs stable. */
+export const BASE_URL: string = (
+  configuredApiUrl || "https://lakshya-the-academic-assistant.onrender.com"
+).replace(/\/+$/, "");
 
 /** Where to send the user when their session is no longer valid. */
 export const LOGIN_PATH = "/";
@@ -120,6 +124,8 @@ export interface RequestOptions {
   auth?: boolean;
   /** Interpret the response as a Blob (for binary downloads). */
   responseType?: "json" | "blob";
+  /** Inspect response headers before the body is consumed. */
+  onResponse?: (response: Response) => void;
 }
 
 /** Build a query string from a params map, skipping null/undefined values. */
@@ -177,7 +183,14 @@ export async function apiRequest<T>(path: string, options: RequestOptions = {}):
   try {
     res = await fetch(url, fetchOpts);
   } catch {
-    throw new ApiError(0, "NETWORK_ERROR", "Network error — please check your connection.");
+    // Browsers intentionally hide the distinction between CORS rejection,
+    // DNS/TLS failure and an offline connection from JavaScript. Avoid claiming
+    // a specific cause; give users and support staff the useful checks instead.
+    throw new ApiError(
+      0,
+      "NETWORK_ERROR",
+      "We couldn't reach the Lakshya server. Check your internet connection and try again. If the problem continues, the server may be unavailable or its CORS settings may not allow this website.",
+    );
   }
 
   // ── 401 → clear session & redirect (only for authenticated requests) ──
@@ -188,6 +201,8 @@ export async function apiRequest<T>(path: string, options: RequestOptions = {}):
     }
     throw new ApiError(401, "UNAUTHENTICATED", "Your session has expired. Please log in again.");
   }
+
+  options.onResponse?.(res);
 
   // ── Parse body ──
   const contentType = res.headers.get("content-type") ?? "";
@@ -290,6 +305,8 @@ export interface ExtractedCourseOutcome {
 }
 
 export interface COExtractionPreview {
+  subject_id?: string;
+  filename?: string;
   cos: ExtractedCourseOutcome[];
   count: number;
   requires_review: boolean;
@@ -475,7 +492,7 @@ export interface COSheetRow {
   usn: string;
   name: string;
   section: string;
-  co_scores: Record<string, number>;
+  co_scores: Record<string, number | null>;
   total: number;
   total_obtained: number;
   total_max: number;
@@ -485,7 +502,7 @@ export interface COSheetRow {
 export interface COSheet {
   columns: string[];
   rows: COSheetRow[];
-  averages: Record<string, number>;
+  averages: Record<string, number | null>;
 }
 
 export interface COSummaryItem {
@@ -664,7 +681,7 @@ export interface AgentProposal {
 export interface AgentChatResponse {
   conversation_id: string;
   reply: string;
-  tool_calls: unknown[];
+  tool_calls: Array<{ name: string; status: string }>;
   proposals: AgentProposal[];
   drafts: unknown[];
 }
@@ -1002,11 +1019,23 @@ export const coSheet = {
     );
   },
 
-  exportSheet(subjectId: string, options?: COSheetOptions): Promise<Blob> {
-    return apiRequest<Blob>(`/subjects/${encodeURIComponent(subjectId)}/co-sheet/export`, {
+  async exportSheet(subjectId: string, options?: COSheetOptions): Promise<{ blob: Blob; filename: string | null }> {
+    let filename: string | null = null;
+    const blob = await apiRequest<Blob>(`/subjects/${encodeURIComponent(subjectId)}/co-sheet/export`, {
       params: toParams(options),
       responseType: "blob",
+      onResponse: (response) => {
+        const disposition = response.headers.get("content-disposition") ?? "";
+        const encoded = disposition.match(/filename\*=UTF-8''([^;]+)/i)?.[1];
+        const plain = disposition.match(/filename="?([^";]+)"?/i)?.[1];
+        let raw = plain;
+        if (encoded) {
+          try { raw = decodeURIComponent(encoded); } catch { raw = plain; }
+        }
+        filename = raw ? raw.replace(/[\r\n\\/]/g, "_") : null;
+      },
     });
+    return { blob, filename };
   },
 
   getStudentProgress(usn: string, subjectId: string): Promise<StudentProgress> {

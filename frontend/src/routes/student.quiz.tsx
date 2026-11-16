@@ -15,6 +15,7 @@ import {
   type ReviewItem,
 } from "@/lib/api";
 import { getStoredSubjectId } from "@/lib/subject-context";
+import { buildCoResultRows } from "@/lib/analytics-display";
 import { cn } from "@/lib/utils";
 
 /** sessionStorage key for the active attempt so a refresh resumes it. */
@@ -38,6 +39,7 @@ export const Route = createFileRoute("/student/quiz")({
 function Page() {
   const queryClient = useQueryClient();
   const [attempt, setAttempt] = useState<AttemptStart | null>(null);
+  const [activeQuizId, setActiveQuizId] = useState<string | null>(null);
   const [answers, setAnswers] = useState<Record<string, number>>({});
   const [saved, setSaved] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -62,6 +64,11 @@ function Page() {
     subjectList[0]?.id;
 
   const subjectObj = subjectList.find((s) => s.id === primarySubjectId);
+  const { data: subjectDetail } = useQuery({
+    queryKey: ["subject-detail", primarySubjectId],
+    queryFn: () => subjects.get(primarySubjectId!),
+    enabled: !!primarySubjectId,
+  });
   const subjectLabel = subjectObj ? `${subjectObj.code} · ${subjectObj.name}` : undefined;
 
   // Load quizzes for the selected subject only.
@@ -99,6 +106,7 @@ function Page() {
                 questions: state.questions,
               });
               setAnswers(state.answers ?? {});
+              setActiveQuizId(state.quiz_id);
             } else {
               // Attempt was already submitted — clear and show quiz list.
               sessionStorage.removeItem(ATTEMPT_STORAGE_KEY);
@@ -121,6 +129,7 @@ function Page() {
       .start(quizId)
       .then((started) => {
         setAttempt(started);
+        setActiveQuizId(quizId);
         setAnswers({});
         setCurrentQuestion(0);
         if (typeof sessionStorage !== "undefined") {
@@ -230,6 +239,7 @@ function Page() {
     setAnswers({});
     setCurrentQuestion(0);
     setAttempt(null);
+    setActiveQuizId(null);
     setSaved(false);
     setSaveError(null);
     setError(null);
@@ -355,9 +365,13 @@ function Page() {
               <span className="text-4xl text-beige">/{result.max_score}</span>
             </div>
             <div className="font-mono text-beige">
-              {Math.round((result.total_score / result.max_score) * 100)}% ·{" "}
+              {result.max_score > 0 ? `${Math.round((result.total_score / result.max_score) * 100)}%` : "Score recorded"} ·{" "}
               {attempt.attempts_left} attempt{attempt.attempts_left === 1 ? "" : "s"} remaining
             </div>
+            <p className="mt-2 text-sm text-beige/80">
+              {allQuizzes.find((quiz) => quiz.id === activeQuizId)?.title ?? "Quiz"}
+              {subjectLabel ? ` · ${subjectLabel}` : ""}
+            </p>
             <div className="mt-6 flex gap-3">
               <Btn variant="onWine" onClick={handleReview}>
                 Review answers
@@ -370,23 +384,30 @@ function Page() {
             </div>
           </div>
           <Card className="col-span-7" title="By course outcome">
-            {result.co_scores
-              .filter((c) => c.percentage !== null)
-              .map((c) => (
-                <div key={c.co_number} className="mb-4 flex items-center gap-3">
-                  <CO n={c.co_number} />
-                  <div className="flex-1">
-                    <Bar
-                      v={c.percentage as number}
-                      target={60}
-                      tone={(c.percentage as number) < 60 ? "wine" : "blue"}
-                    />
+            {(() => {
+              const outcomes = subjectDetail?.cos?.length
+                ? subjectDetail.cos.map((co) => co.number)
+                : result.co_scores.map((score) => score.co_number);
+              const rows = buildCoResultRows(outcomes, result.co_scores);
+              if (!rows.length) return <p className="text-sm text-muted-foreground">No course-outcome breakdown was returned for this quiz.</p>;
+              return rows.map(({ coNumber, score }) => (
+                  <div key={coNumber} className="mb-4 flex items-center gap-3">
+                    <CO n={coNumber} />
+                    {score ? (
+                      <>
+                        <div className="min-w-0 flex-1">
+                          <Bar v={score.percentage ?? 0} />
+                        </div>
+                        <span className="min-w-24 text-right font-mono text-sm">
+                          {score.marks}/{score.max} · {score.percentage === null ? "—" : `${Math.round(score.percentage)}%`}
+                        </span>
+                      </>
+                    ) : (
+                      <span className="ml-auto text-sm text-muted-foreground">Not assessed</span>
+                    )}
                   </div>
-                  <span className="font-mono text-sm">
-                    {Math.round(c.percentage as number)}%
-                  </span>
-                </div>
-              ))}
+              ));
+            })()}
           </Card>
         </div>
       </Shell>
@@ -463,7 +484,7 @@ function Page() {
     <Shell role="student" subjectLabel={subjectLabel}>
       <PageHead
         eyebrow={`Attempt ${attempt.attempt_number} of ${totalAttempts}`}
-        title={openQuiz?.title ?? "Quiz"}
+        title={allQuizzes.find((quiz) => quiz.id === activeQuizId)?.title ?? openQuiz?.title ?? "Quiz"}
         right={
           openQuiz?.closes_at ? (
             <div className="flex items-center gap-2 rounded-full bg-wine px-4 py-2 font-mono text-sm text-ivory">
@@ -496,9 +517,14 @@ function Page() {
           <div className="mt-2">
             <Bar v={((currentQuestion + 1) / questions.length) * 100} />
           </div>
-          <p className="mt-8 font-serif text-3xl font-semibold text-espresso">
-            {questions[currentQuestion]!.stem}
-          </p>
+          <div className="mt-8 flex items-start justify-between gap-4">
+            <p className="font-serif text-3xl font-semibold text-espresso">
+              {questions[currentQuestion]!.stem}
+            </p>
+            <span className="shrink-0 rounded-full bg-beige px-3 py-1 font-mono text-xs text-wine">
+              {questions[currentQuestion]!.marks} marks
+            </span>
+          </div>
           <div className="mt-6 space-y-3">
             {questions[currentQuestion]!.options.map((o, k) => (
               <button

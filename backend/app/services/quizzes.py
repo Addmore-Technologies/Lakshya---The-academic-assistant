@@ -170,6 +170,14 @@ class InMemoryQuizStore:
     def is_student_enrolled(self, student_id: str, subject_id: str) -> bool:
         return (student_id, subject_id) in self.enrollments
 
+        self.enrollments: set[tuple[str, str]] = set()
+
+    def add_enrollment(self, student_id: str, subject_id: str) -> None:
+        self.enrollments.add((student_id, subject_id))
+
+    def is_student_enrolled(self, student_id: str, subject_id: str) -> bool:
+        return (student_id, subject_id) in self.enrollments
+
     def save_quiz(self, quiz: QuizRecord) -> QuizRecord:
         self.quizzes[quiz.id] = quiz
         return quiz
