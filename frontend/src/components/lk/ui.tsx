@@ -164,16 +164,22 @@ export function Field({
   label,
   children,
   error,
+  errorId,
 }: {
   label: string;
   children: ReactNode;
   error?: string | undefined;
+  errorId?: string | undefined;
 }) {
   return (
     <label className="block">
       <span className="eyebrow">{label}</span>
       <div className="mt-1.5">{children}</div>
-      {error && <span className="mt-1 block text-xs text-wine">{error}</span>}
+      {error && (
+        <span id={errorId} className="mt-1 block text-xs text-wine">
+          {error}
+        </span>
+      )}
     </label>
   );
 }

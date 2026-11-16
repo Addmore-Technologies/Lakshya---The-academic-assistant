@@ -12,3 +12,4 @@ python-pptx>=1.0
 openpyxl>=3.1
 pydantic>=2
 pypdf>=5.0,<6
+pytesseract>=0.3.13

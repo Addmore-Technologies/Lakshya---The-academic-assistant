@@ -7,6 +7,7 @@ from sqlalchemy import text
 from ..db import get_conn
 from ..deps import get_current_user, require_faculty
 from ..errors import AppError
+from ..engine.attainment_config import validate_percentage
 
 router = APIRouter(tags=["subjects"])
 
@@ -14,6 +15,13 @@ router = APIRouter(tags=["subjects"])
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def _validated_percentage(value, field_name):
+    try:
+        return validate_percentage(value, field_name)
+    except (ValueError, OverflowError) as exc:
+        raise AppError(422, "VALIDATION_ERROR", str(exc)) from exc
+
 
 def _subject_owned(conn, subject_id: str, faculty_user_id: str):
     """Return the subject row if the faculty owns it, else raise 404."""
@@ -118,8 +126,14 @@ def create_subject(
     code = payload.get("code")
     name = payload.get("name")
     semester = payload.get("semester")
-    target = payload.get("target_attainment_pct", 60)
-    threshold = payload.get("default_threshold_pct", 60)
+    target = _validated_percentage(
+        payload.get("target_attainment_pct", 60),
+        "target_attainment_pct",
+    )
+    threshold = _validated_percentage(
+        payload.get("default_threshold_pct", 60),
+        "default_threshold_pct",
+    )
 
     if not code or not name or semester is None:
         raise AppError(400, "BAD_REQUEST", "code, name and semester are required")
@@ -193,7 +207,10 @@ def update_subject(
     updates = {}
     for field in ("code", "name", "semester", "target_attainment_pct", "default_threshold_pct"):
         if field in payload:
-            updates[field] = payload[field]
+            value = payload[field]
+            if field in ("target_attainment_pct", "default_threshold_pct"):
+                value = _validated_percentage(value, field)
+            updates[field] = value
 
     if not updates:
         return _row_to_subject(row)
@@ -269,8 +286,29 @@ def upsert_cos(
     for co in cos:
         number = co.get("number")
         description = co.get("description")
-        threshold = co.get("threshold_pct", 60)
-        target = co.get("target_attainment_pct", 60)
+        existing = conn.execute(
+            text(
+                "SELECT threshold_pct, target_attainment_pct "
+                "FROM course_outcomes "
+                "WHERE subject_id = :sid AND number = :num"
+            ),
+            {"sid": id, "num": number},
+        ).mappings().fetchone()
+
+        threshold = _validated_percentage(
+            co.get(
+                "threshold_pct",
+                existing["threshold_pct"] if existing else 60,
+            ),
+            "threshold_pct",
+        )
+        target = _validated_percentage(
+            co.get(
+                "target_attainment_pct",
+                existing["target_attainment_pct"] if existing else 60,
+            ),
+            "target_attainment_pct",
+        )
         bloom_level = co.get("bloom_level")
         bloom_name = co.get("bloom_name")
 

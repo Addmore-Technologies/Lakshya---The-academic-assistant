@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute } from "@tanstack/react-router";
-import { AlertTriangle, FileText, UploadCloud } from "lucide-react";
+import { AlertTriangle, ArrowDown, ArrowUp, CheckCircle2, FileText, Plus, RefreshCw, Trash2, UploadCloud } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { Toaster } from "@/components/ui/sonner";
@@ -9,6 +9,7 @@ import { Bar, Btn, Card, Chip, CO, Field, inputCls, PageHead } from "@/component
 import { cn } from "@/lib/utils";
 import { ApiError, modules, roster, subjects, upload } from "@/lib/api";
 import { getStoredSubjectId, storeSubjectId } from "@/lib/subject-context";
+import { COURSE_OUTCOME_API_LIMIT, renumberCourseOutcomes, validateCourseOutcomeDraft } from "@/lib/course-outcomes";
 import type {
   COExtractionPreview,
   ExtractedCourseOutcome,
@@ -50,6 +51,7 @@ function Page() {
   const [editedCOs, setEditedCOs] = useState<ExtractedCourseOutcome[]>([]);
   const [extractingCOs, setExtractingCOs] = useState(false);
   const [savingCOs, setSavingCOs] = useState(false);
+  const [coExtractionError, setCoExtractionError] = useState<string | null>(null);
 
   // Roster upload
   const [rosterFile, setRosterFile] = useState<File | null>(null);
@@ -64,7 +66,7 @@ function Page() {
 
   const activeSubject = subjectId ?? subjectList?.[0]?.id ?? null;
 
-  const { data: detail } = useQuery<SubjectDetail>({
+  const { data: detail, isLoading: detailLoading, isError: detailError, refetch: refetchDetail } = useQuery<SubjectDetail>({
     queryKey: ["subject-detail", activeSubject],
     queryFn: () => subjects.get(activeSubject!),
     enabled: !!activeSubject,
@@ -145,11 +147,14 @@ function Page() {
       toast.error("Please select a .pptx file first.");
       return;
     }
-    if (!selectedFile.name.toLowerCase().endsWith(".pptx")) {
-      toast.error("Only .pptx files are supported.");
+    if (![".pdf", ".ppt", ".pptx"].some(ext => selectedFile.name.toLowerCase().endsWith(ext))) {
+      toast.error("Only PDF, PPT, and PPTX files are supported.");
       return;
     }
-
+    if (selectedFile.size > 25 * 1024 * 1024) {
+      toast.error("The presentation must be 25 MB or smaller.");
+      return;
+    }
     setUploadError(null);
     let modId = selectedModule;
 
@@ -226,21 +231,10 @@ function Page() {
   const handleSaveCOs = async () => {
     if (!activeSubject || !coPreview || savingCOs || extractingCOs) return;
 
-    if (!editedCOs.length) {
-      toast.error("No Course Outcomes to save.");
-      return;
-    }
-
-    if (
-      editedCOs.some(
-        (co) =>
-          !Number.isInteger(co.number) ||
-          co.number < 1 ||
-          co.number > 6 ||
-          !co.description.trim(),
-      )
-    ) {
-      toast.error("Each CO must have a number from 1 to 6 and a description.");
+    // The current backend enforces a maximum of six, but subjects may have fewer.
+    const draftError = validateCourseOutcomeDraft(editedCOs);
+    if (draftError) {
+      toast.error(draftError);
       return;
     }
 
@@ -263,9 +257,12 @@ function Page() {
       );
     }).length;
 
-    const message = changes
-      ? `This will update ${changes} existing Course Outcomes and save the reviewed results. Continue?`
-      : `Approve and save ${editedCOs.length} Course Outcomes?`;
+    const removedExisting = (detail?.cos ?? []).filter((co) => !editedCOs.some((draft) => draft.number === co.number));
+    const message = [
+      changes ? `This will update ${changes} existing Course Outcome(s).` : `Approve ${editedCOs.length} Course Outcome(s)?`,
+      removedExisting.length ? `${removedExisting.length} approved outcome(s) omitted from this draft will remain saved because the current API does not support deletion.` : "",
+      "Continue?",
+    ].filter(Boolean).join("\n\n");
 
     if (!window.confirm(message)) return;
 
@@ -305,6 +302,7 @@ function Page() {
       setCoPreview(null);
       setEditedCOs([]);
       setSyllabusFile(null);
+      setCoExtractionError(null);
 
       toast.success(`${saved.length} Course Outcomes saved successfully.`);
     } catch (error) {
@@ -321,21 +319,32 @@ function Page() {
   const handleExtractCOs = async () => {
     if (!activeSubject || !syllabusFile || extractingCOs || savingCOs) return;
 
+    if (syllabusFile.size > 10 * 1024 * 1024) {
+      setCoExtractionError("Syllabus must be 10 MB or smaller.");
+      return;
+    }
+    if (![".pdf", ".ppt", ".pptx", ".jpg", ".jpeg"].some(ext => syllabusFile.name.toLowerCase().endsWith(ext))) {
+      setCoExtractionError("Upload a PDF, PPT, PPTX, JPG, or JPEG file.");
+      return;
+    }
+
     setExtractingCOs(true);
+    setCoExtractionError(null);
     setCoPreview(null);
     setEditedCOs([]);
 
     try {
       const result = await subjects.extractCOs(activeSubject, syllabusFile);
       setCoPreview(result);
-      setEditedCOs(result.cos.map((co) => ({ ...co })));
+      setEditedCOs(result.cos.slice(0, COURSE_OUTCOME_API_LIMIT).map((co, index) => ({ ...co, number: index + 1 })));
+      if (result.count > COURSE_OUTCOME_API_LIMIT) {
+        setCoExtractionError(`The extractor returned ${result.count} outcomes, but the current save API supports at most ${COURSE_OUTCOME_API_LIMIT}. The first ${COURSE_OUTCOME_API_LIMIT} are loaded for review; coordinate an API expansion before saving a larger set.`);
+      }
       toast.success(`Extracted ${result.count} Course Outcomes for review.`);
     } catch (error) {
-      toast.error(
-        error instanceof ApiError
-          ? error.message
-          : "Could not extract Course Outcomes from the PDF.",
-      );
+      const message = error instanceof ApiError ? error.message : "Could not extract Course Outcomes from the syllabus.";
+      setCoExtractionError(message);
+      toast.error(message);
     } finally {
       setExtractingCOs(false);
     }
@@ -370,6 +379,7 @@ function Page() {
               setSyllabusFile(null);
               setCoPreview(null);
               setEditedCOs([]);
+              setCoExtractionError(null);
             }}
             className="h-10 rounded-full border border-wine/30 bg-ivory px-4 text-sm text-wine disabled:cursor-not-allowed disabled:opacity-50"
           >
@@ -382,89 +392,147 @@ function Page() {
         }
       />
       <div className="grid grid-cols-12 gap-5">
-        {/* Syllabus PDF extraction */}
-        <Card className="col-span-12" title="Syllabus & Course Outcomes">
-          <div className="space-y-4">
-            <p className="text-sm text-muted-foreground">
-              Upload a text-based syllabus PDF (maximum 10 MB).
-              Lakshya extracts Course Outcomes and suggests Bloom taxonomy levels.
-              Review all results before saving.
-            </p>
+        {/* Subject-specific Course Outcome upload, review and approval */}
+        <Card className="col-span-12" title="Course Outcomes">
+          <div className="space-y-5">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <p className="text-sm text-muted-foreground">
+                  Upload the official syllabus PDF for the selected subject. Extracted outcomes remain a draft until you review and approve them.
+                  Supported formats: PDF, PPT, PPTX, JPG, and JPEG (maximum 10 MB).
+                </p>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Selected subject: <strong>{detail ? `${detail.code} · ${detail.name}` : subjectList.find((item) => item.id === activeSubject)?.name ?? "Loading subject…"}</strong>
+                </p>
+              </div>
+              <div className="rounded-full border border-success/30 bg-success/5 px-3 py-1 text-xs text-success">
+                {detail?.cos?.length ?? 0} approved outcome(s)
+              </div>
+            </div>
 
-            <input
-              type="file"
-              accept=".pdf,application/pdf"
-              disabled={extractingCOs || savingCOs}
-              onChange={(event) => {
-                const file = event.target.files?.[0] ?? null;
-                setSyllabusFile(file);
-                setCoPreview(null);
-                setEditedCOs([]);
-              }}
-            />
+            <div className="rounded-2xl border border-wine/15 bg-ivory/60 p-4">
+              <div className="mb-3 flex items-center gap-2 text-sm font-semibold text-wine">
+                <CheckCircle2 className="size-4" /> Approved / saved outcomes
+              </div>
+              {detailLoading ? (
+                <p role="status" className="text-sm text-muted-foreground">Loading approved outcomes…</p>
+              ) : detailError ? (
+                <div role="alert" className="flex flex-wrap items-center justify-between gap-2 text-sm text-wine">
+                  <span>Could not load saved outcomes for this subject.</span>
+                  <Btn variant="secondary" size="sm" onClick={() => void refetchDetail()}>Retry</Btn>
+                </div>
+              ) : detail?.cos?.length ? (
+                <div className="grid gap-2 md:grid-cols-2">
+                  {detail.cos.slice().sort((a, b) => a.number - b.number).map((co) => (
+                    <div key={co.id} className="rounded-xl border border-success/20 bg-background p-3">
+                      <div className="mb-1 flex items-center justify-between gap-2">
+                        <CO n={co.number} />
+                        <span className="text-[11px] text-success">Approved</span>
+                      </div>
+                      <p className="text-sm">{co.description}</p>
+                      {co.bloom_name && <p className="mt-1 text-xs text-muted-foreground">Bloom: {co.bloom_name}</p>}
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="text-sm text-muted-foreground">No approved Course Outcomes are saved for this subject yet.</p>
+              )}
+            </div>
 
-            <Btn
-              onClick={() => void handleExtractCOs()}
-              disabled={!activeSubject || !syllabusFile || extractingCOs || savingCOs}
-            >
-              {extractingCOs ? "Extracting..." : "Extract Course Outcomes"}
-            </Btn>
+            <div className="flex flex-wrap items-center gap-3">
+              <label className="flex min-h-11 cursor-pointer items-center gap-2 rounded-full border border-wine/30 bg-background px-4 text-sm text-wine hover:bg-beige/40">
+                <UploadCloud className="size-4" />
+                Choose syllabus PDF, PPT, PPTX, or JPG
+                <input
+                  type="file"
+                  className="sr-only"
+                  accept=".pdf,.ppt,.pptx,.jpg,.jpeg"
+                  disabled={extractingCOs || savingCOs}
+                  onChange={(event) => {
+                    const file = event.target.files?.[0] ?? null;
+                    setSyllabusFile(file);
+                    setCoPreview(null);
+                    setEditedCOs([]);
+                    setCoExtractionError(null);
+                  }}
+                />
+              </label>
+              <span className="max-w-full truncate text-sm text-muted-foreground" title={syllabusFile?.name}>
+                {syllabusFile?.name ?? "No file selected"}
+              </span>
+              <Btn
+                onClick={() => void handleExtractCOs()}
+                disabled={!activeSubject || !syllabusFile || extractingCOs || savingCOs}
+              >
+                {extractingCOs ? <><RefreshCw className="size-4 animate-spin" /> Extracting…</> : "Extract Course Outcomes"}
+              </Btn>
+            </div>
+
+            {extractingCOs && (
+              <div role="status" className="rounded-xl bg-beige/50 p-3 text-sm text-wine">
+                Processing {syllabusFile?.name ?? "the syllabus"}. Keep this page open until extraction finishes.
+              </div>
+            )}
+            {coExtractionError && (
+              <div role="alert" className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-warn/30 bg-warn/5 p-3 text-sm">
+                <span className="flex items-start gap-2"><AlertTriangle className="mt-0.5 size-4 shrink-0" />{coExtractionError}</span>
+                {syllabusFile && !extractingCOs && !savingCOs && (
+                  <Btn variant="secondary" size="sm" onClick={() => void handleExtractCOs()}>Retry extraction</Btn>
+                )}
+              </div>
+            )}
 
             {coPreview && (
-              <div className="space-y-3">
-                <p className="text-sm font-semibold text-wine">
-                  {coPreview.count} Course Outcomes extracted
-                </p>
+              <section aria-label="Extracted Course Outcome draft" className="space-y-4 rounded-2xl border border-wine/20 p-4">
+                <div className="flex flex-wrap items-start justify-between gap-2">
+                  <div>
+                    <div className="flex items-center gap-2 text-sm font-semibold text-wine">
+                      <FileText className="size-4" /> Extracted draft · {coPreview.count} detected
+                    </div>
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      Source: {coPreview.filename ?? syllabusFile?.name ?? "Uploaded syllabus"} · Not yet approved
+                    </p>
+                  </div>
+                  <Chip s="Draft" />
+                </div>
 
                 {editedCOs.map((co, index) => (
-                  <div
-                    key={co.number}
-                    className="space-y-3 rounded-xl border border-wine/15 bg-ivory/70 p-4"
-                  >
-                    <CO n={co.number} />
+                  <div key={`${co.number}-${index}`} className="space-y-3 rounded-xl border border-wine/15 bg-ivory/70 p-4">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <CO n={co.number} />
+                      <div className="flex items-center gap-1">
+                        <Btn type="button" variant="ghost" size="sm" aria-label={`Move CO${co.number} up`} disabled={index === 0 || savingCOs} onClick={() => setEditedCOs((current) => {
+                          const next = [...current];
+                          [next[index - 1], next[index]] = [next[index], next[index - 1]];
+                          return renumberCourseOutcomes(next);
+                        })}><ArrowUp className="size-4" /></Btn>
+                        <Btn type="button" variant="ghost" size="sm" aria-label={`Move CO${co.number} down`} disabled={index === editedCOs.length - 1 || savingCOs} onClick={() => setEditedCOs((current) => {
+                          const next = [...current];
+                          [next[index + 1], next[index]] = [next[index], next[index + 1]];
+                          return renumberCourseOutcomes(next);
+                        })}><ArrowDown className="size-4" /></Btn>
+                        <Btn type="button" variant="ghost" size="sm" aria-label={`Remove CO${co.number} from draft`} disabled={savingCOs} onClick={() => setEditedCOs((current) => renumberCourseOutcomes(current.filter((_, i) => i !== index)))}><Trash2 className="size-4" /></Btn>
+                      </div>
+                    </div>
 
                     <Field label="Course Outcome description">
                       <textarea
                         className={cn(inputCls, "w-full min-h-24")}
                         value={co.description}
-                        onChange={(event) =>
-                          setEditedCOs((current) =>
-                            current.map((item, i) =>
-                              i === index
-                                ? { ...item, description: event.target.value }
-                                : item,
-                            ),
-                          )
-                        }
+                        aria-label={`CO${co.number} description`}
+                        onChange={(event) => setEditedCOs((current) => current.map((item, i) => i === index ? { ...item, description: event.target.value } : item))}
                       />
                     </Field>
-
                     <Field label="Bloom taxonomy level">
                       <select
                         className={cn(inputCls, "w-full")}
                         value={co.bloom_level ?? ""}
+                        aria-label={`CO${co.number} Bloom taxonomy level`}
                         onChange={(event) => {
                           const value = event.target.value;
                           const level = value ? Number(value) : null;
-                          const names = [
-                            "Remembering",
-                            "Understanding",
-                            "Applying",
-                            "Analyzing",
-                            "Evaluating",
-                            "Creating",
-                          ];
-                          setEditedCOs((current) =>
-                            current.map((item, i) =>
-                              i === index
-                                ? {
-                                    ...item,
-                                    bloom_level: level,
-                                    bloom_name: level ? (names[level - 1] ?? null) : null,
-                                  }
-                                : item,
-                            ),
-                          );
+                          const names = ["Remembering", "Understanding", "Applying", "Analyzing", "Evaluating", "Creating"];
+                          setEditedCOs((current) => current.map((item, i) => i === index ? { ...item, bloom_level: level, bloom_name: level ? (names[level - 1] ?? null) : null } : item));
                         }}
                       >
                         <option value="">Not assigned</option>
@@ -479,21 +547,18 @@ function Page() {
                   </div>
                 ))}
 
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <Btn type="button" variant="secondary" disabled={editedCOs.length >= COURSE_OUTCOME_API_LIMIT || savingCOs} onClick={() => setEditedCOs((current) => renumberCourseOutcomes([...current, { number: current.length + 1, description: "", bloom_level: null, bloom_name: null, threshold_pct: 60, target_attainment_pct: 60 }]))}>
+                    <Plus className="size-4" /> Add outcome {editedCOs.length >= COURSE_OUTCOME_API_LIMIT ? "(API limit reached)" : ""}
+                  </Btn>
+                  <Btn onClick={() => void handleSaveCOs()} disabled={savingCOs || extractingCOs || !editedCOs.length || coPreview.count > COURSE_OUTCOME_API_LIMIT}>
+                    {savingCOs ? "Saving Course Outcomes…" : "Approve & Save Course Outcomes"}
+                  </Btn>
+                </div>
                 <p className="text-xs text-muted-foreground">
-                  Review descriptions and Bloom levels carefully.
-                  Saving updates matching CO numbers and creates new ones.
-                  Existing attainment thresholds will be preserved.
+                  Reorder outcomes with the arrow controls. Removing an item here removes it from this draft only; the current backend API has no delete operation for already-approved outcomes. The current API also validates CO numbers from 1 to 6. Existing attainment thresholds are preserved when matching CO numbers are updated.
                 </p>
-
-                <Btn
-                  onClick={() => void handleSaveCOs()}
-                  disabled={savingCOs || extractingCOs || !editedCOs.length}
-                >
-                  {savingCOs
-                    ? "Saving Course Outcomes..."
-                    : "Approve & Save Course Outcomes"}
-                </Btn>
-              </div>
+              </section>
             )}
           </div>
         </Card>
@@ -552,10 +617,13 @@ function Page() {
             >
               <input
                 type="file"
-                accept=".pptx"
+                accept=".pdf,.ppt,.pptx"
                 ref={fileInputRef}
                 className="hidden"
-                onChange={(e) => setSelectedFile(e.target.files?.[0] ?? null)}
+                onChange={(e) => {
+                  setSelectedFile(e.target.files?.[0] ?? null);
+                  setUploadError(null);
+                }}
               />
               <UploadCloud className="size-10 text-wine" strokeWidth={1.3} />
               <div className="mt-3 font-serif text-2xl text-wine">
