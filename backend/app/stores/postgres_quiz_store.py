@@ -12,6 +12,7 @@ from datetime import datetime
 from typing import Any, Sequence
 
 from sqlalchemy import text
+from ..errors import AppError
 from sqlalchemy.exc import IntegrityError
 
 from app.services.quizzes import (
@@ -232,6 +233,71 @@ class PostgresQuizStore:
         ).mappings().fetchall()
         return [self._row_to_question(r) for r in rows]
 
+    def _create_question_snapshot(self, quiz_id):
+        """Capture immutable question data when an attempt starts."""
+        questions = self.get_questions_for_quiz(quiz_id)
+
+        return [
+            {
+                "id": str(q.id),
+                "module_id": str(q.module_id),
+                "co_id": str(q.co_id) if q.co_id else None,
+                "co_number": q.co_number,
+                "stem": q.stem,
+                "options": q.options,
+                "correct_option": q.correct_option,
+                "explanation": getattr(q, "explanation", None),
+                "marks": q.marks,
+            }
+            for q in questions
+        ]
+
+    def get_attempt_question_snapshot(self, attempt_id):
+        """Return the immutable question snapshot for an attempt."""
+        row = self.conn.execute(
+            text("""
+                SELECT question_snapshot
+                FROM quiz_attempts
+                WHERE id = :attempt_id
+            """),
+            {"attempt_id": str(attempt_id)},
+        ).mappings().first()
+
+        if row is None:
+            return None
+
+        return _json_loads(row["question_snapshot"])
+
+    def _resolve_attempt_assignment(self, attempt):
+        """Resolve the student's active class for the quiz's subject."""
+        row = self.conn.execute(
+            text("""
+                SELECT e.teaching_assignment_id
+                FROM enrollments e
+                JOIN quizzes q ON q.subject_id = e.subject_id
+                JOIN teaching_assignments ta
+                    ON ta.id = e.teaching_assignment_id
+                WHERE q.id = :quiz_id
+                  AND e.student_id = :student_id
+                  AND ta.subject_id = q.subject_id
+                  AND ta.status = 'active'
+                  AND e.section = ta.section
+            """),
+            {
+                "quiz_id": str(attempt.quiz_id),
+                "student_id": str(attempt.student_id),
+            },
+        ).mappings().first()
+
+        if row is None:
+            raise AppError(
+                403,
+                "NOT_ENROLLED",
+                "Student must belong to an active class before starting a quiz attempt.",
+            )
+
+        return str(row["teaching_assignment_id"])
+
     def save_attempt(self, attempt: QuizAttemptRecord) -> QuizAttemptRecord:
         existing = self.conn.execute(
             text("SELECT id FROM quiz_attempts WHERE id = :id"),
@@ -266,12 +332,18 @@ class PostgresQuizStore:
                         "INSERT INTO quiz_attempts "
                         "(id, quiz_id, student_id, attempt_number, "
                         "answers, total_score, max_score, "
-                        "started_at, submitted_at) "
+                        "started_at, submitted_at, teaching_assignment_id, "
+                        "question_snapshot) "
                         "VALUES (:id, :qid, :sid, :an, "
-                        "CAST(:answers AS jsonb), :ts, :ms, :started, :submitted)"
+                        "CAST(:answers AS jsonb), :ts, :ms, :started, :submitted, "
+                        ":assignment_id, CAST(:question_snapshot AS jsonb))"
                     ),
                     {
                         "id": str(attempt.id),
+                        "assignment_id": self._resolve_attempt_assignment(attempt),
+                        "question_snapshot": json.dumps(
+                            self._create_question_snapshot(str(attempt.quiz_id))
+                        ),
                         "qid": str(attempt.quiz_id),
                         "sid": str(attempt.student_id),
                         "an": attempt.attempt_number,

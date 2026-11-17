@@ -117,6 +117,35 @@ def _subject_owned(conn, subject_id: str, faculty_user_id: str):
 # Endpoints
 # ---------------------------------------------------------------------------
 
+
+
+def _get_or_create_assignment(conn, subject_id: str, section: str):
+    """Resolve the active teaching assignment for a subject and section."""
+    row = conn.execute(
+        text("""
+            SELECT id FROM teaching_assignments
+            WHERE subject_id = :subject_id
+              AND section = :section
+              AND status = 'active'
+        """),
+        {"subject_id": subject_id, "section": section},
+    ).mappings().first()
+
+    if row:
+        return str(row["id"])
+
+    row = conn.execute(
+        text("""
+            INSERT INTO teaching_assignments (subject_id, section, status)
+            VALUES (:subject_id, :section, 'active')
+            RETURNING id
+        """),
+        {"subject_id": subject_id, "section": section},
+    ).mappings().first()
+
+    return str(row["id"])
+
+
 @router.post("/subjects/{id}/roster/preview")
 def preview_roster(
     id: str = Path(..., alias="id"),
@@ -212,10 +241,18 @@ def confirm_roster(
             else:
                 conn.execute(
                     text(
-                        "INSERT INTO enrollments (student_id, subject_id, section) "
-                        "VALUES (:sid, :subj, :sec)"
+                        "INSERT INTO enrollments "
+                        "(student_id, subject_id, section, teaching_assignment_id) "
+                        "VALUES (:sid, :subj, :sec, :assignment_id)"
                     ),
-                    {"sid": student_id, "subj": id, "sec": section},
+                    {
+                        "sid": student_id,
+                        "subj": id,
+                        "sec": section,
+                        "assignment_id": _get_or_create_assignment(
+                            conn, id, section
+                        ),
+                    },
                 )
                 created_enrollments += 1
             # Existing student keeps their PIN — never returned
@@ -248,10 +285,18 @@ def confirm_roster(
             # Enroll
             conn.execute(
                 text(
-                    "INSERT INTO enrollments (student_id, subject_id, section) "
-                    "VALUES (:sid, :subj, :sec)"
+                    "INSERT INTO enrollments "
+                    "(student_id, subject_id, section, teaching_assignment_id) "
+                    "VALUES (:sid, :subj, :sec, :assignment_id)"
                 ),
-                {"sid": student_id, "subj": id, "sec": section},
+                {
+                        "sid": student_id,
+                        "subj": id,
+                        "sec": section,
+                        "assignment_id": _get_or_create_assignment(
+                            conn, id, section
+                        ),
+                    },
             )
             created_enrollments += 1
             credentials.append({"usn": usn, "pin": pin})
