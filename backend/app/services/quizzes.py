@@ -373,6 +373,29 @@ def _mask_questions_for_student(questions: Sequence[QuestionRecord]) -> list[dic
     ]
 
 
+def _questions_for_attempt(store, attempt):
+    """Use saved questions when available; support legacy attempts."""
+    from types import SimpleNamespace
+
+    reader = getattr(store, "get_attempt_question_snapshot", None)
+
+    if callable(reader):
+        snapshot = reader(attempt.id)
+
+        if snapshot is not None:
+            return [
+                SimpleNamespace(
+                    **{
+                        **item,
+                        "explanation": item.get("explanation"),
+                    }
+                )
+                for item in snapshot
+            ]
+
+    return store.get_questions_for_quiz(attempt.quiz_id)
+
+
 def start_quiz_attempt(
     store: QuizStore,
     student_user: dict[str, Any],
@@ -421,7 +444,7 @@ def start_quiz_attempt(
     )
     store.save_attempt(attempt)
 
-    raw_questions = store.get_questions_for_quiz(quiz_id)
+    raw_questions = _questions_for_attempt(store, attempt)
     masked_questions = _mask_questions_for_student(raw_questions)
 
     return {
@@ -448,7 +471,7 @@ def get_active_attempt(
 
     quiz = store.get_quiz(attempt.quiz_id)
     max_att = load_grading_settings().max_attempts
-    raw_questions = store.get_questions_for_quiz(attempt.quiz_id)
+    raw_questions = _questions_for_attempt(store, attempt)
 
     return {
         "attempt_id": attempt.id,
@@ -517,6 +540,23 @@ def submit_attempt(
         raise NotFoundError("Quiz not found.")
 
     questions = store.get_questions_for_quiz(attempt.quiz_id)
+
+    # Prefer the question data captured when this attempt began.
+    # Older attempts and in-memory test stores can use legacy behavior.
+    snapshot_reader = getattr(store, "get_attempt_question_snapshot", None)
+    snapshot = (
+        snapshot_reader(attempt.id)
+        if callable(snapshot_reader)
+        else None
+    )
+
+    if snapshot is not None:
+        from types import SimpleNamespace
+        questions = [
+            SimpleNamespace(**item)
+            for item in snapshot
+        ]
+
     qkeys = [
         QuestionKey(
             id=q.id,
@@ -640,7 +680,7 @@ def review_attempt(
     if attempt.submitted_at is None:
         raise QuizError("BAD_REQUEST", "Review is only available after attempt is submitted.", 400)
 
-    questions = store.get_questions_for_quiz(attempt.quiz_id)
+    questions = _questions_for_attempt(store, attempt)
     review_items = []
     for q in questions:
         chosen = attempt.answers.get(q.id)
