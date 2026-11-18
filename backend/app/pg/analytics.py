@@ -28,22 +28,22 @@ class PostgresAnalyticsStore:
     def get_subject_cos(self, subject_id: str) -> list[COConfig]:
         rows = self.conn.execute(
             text(
-                "SELECT number, threshold_pct, target_attainment_pct "
+                "SELECT number, threshold_pct, target_attainment_pct, description "
                 "FROM course_outcomes WHERE subject_id = :sid ORDER BY number"
             ),
             {"sid": as_uuid(subject_id, "Subject")},
         ).fetchall()
-        return [COConfig(int(r[0]), float(r[1]), float(r[2])) for r in rows]
+        return [COConfig(int(r[0]), float(r[1]), float(r[2]), r[3]) for r in rows]
 
     def get_co_by_id(self, co_id: str) -> COConfig | None:
         row = self.conn.execute(
             text(
-                "SELECT number, threshold_pct, target_attainment_pct "
+                "SELECT number, threshold_pct, target_attainment_pct, description "
                 "FROM course_outcomes WHERE id = :id"
             ),
             {"id": as_uuid(co_id, "Course outcome")},
         ).fetchone()
-        return COConfig(int(row[0]), float(row[1]), float(row[2])) if row else None
+        return COConfig(int(row[0]), float(row[1]), float(row[2]), row[3]) if row else None
 
     def co_numbers_to_ids(self, subject_id: str) -> dict[int, str]:
         rows = self.conn.execute(
@@ -54,14 +54,19 @@ class PostgresAnalyticsStore:
 
     # -- people ----------------------------------------------------------
 
-    def get_subject_roster(self, subject_id: str) -> list[StudentInfo]:
+    def get_subject_roster(self, subject_id: str, *, assignment_id: str | None = None) -> list[StudentInfo]:
+        params = {"sid": as_uuid(subject_id, "Subject")}
+        scope = ""
+        if assignment_id is not None:
+            params["assignment_id"] = assignment_id
+            scope = " AND e.teaching_assignment_id = :assignment_id"
         rows = self.conn.execute(
             text(
                 "SELECT s.usn, s.name, e.section FROM enrollments e "
                 "JOIN students s ON s.id = e.student_id "
-                "WHERE e.subject_id = :sid ORDER BY s.usn"
+                f"WHERE e.subject_id = :sid{scope} ORDER BY s.usn"
             ),
-            {"sid": as_uuid(subject_id, "Subject")},
+            params,
         ).fetchall()
         return [StudentInfo(usn=r[0], name=r[1], section=r[2]) for r in rows]
 
@@ -78,8 +83,18 @@ class PostgresAnalyticsStore:
 
     # -- scores ----------------------------------------------------------
 
-    def get_subject_attempts(self, subject_id: str) -> list[AttemptScore]:
-        sid = as_uuid(subject_id, "Subject")
+    def get_subject_attempts(self, subject_id: str, *, assignment_id: str | None = None) -> list[AttemptScore]:
+        params = {"sid": as_uuid(subject_id, "Subject")}
+        scope = ""
+        if assignment_id is not None:
+            params["assignment_id"] = assignment_id
+            # Both the attempt's recorded class and the current enrollment must match.
+            scope = """
+                AND a.teaching_assignment_id = :assignment_id
+                AND a.student_id = s.student_id AND z.subject_id = :sid AND c.subject_id = :sid
+                AND EXISTS (SELECT 1 FROM enrollments e WHERE e.student_id = a.student_id
+                            AND e.subject_id = :sid AND e.teaching_assignment_id = :assignment_id)
+            """
         rows = self.conn.execute(
             text(
                 "SELECT s.attempt_id, st.usn, a.quiz_id, a.attempt_number, a.answers, "
@@ -91,15 +106,17 @@ class PostgresAnalyticsStore:
                 "JOIN students st ON st.id = s.student_id "
                 "JOIN course_outcomes c ON c.id = s.co_id "
                 "WHERE s.subject_id = :sid AND a.submitted_at IS NOT NULL "
-                "ORDER BY st.usn, a.quiz_id, a.attempt_number, c.number"
+                f"{scope} ORDER BY st.usn, a.quiz_id, a.attempt_number, c.number"
             ),
-            {"sid": sid},
+            params,
         ).mappings().fetchall()
         if not rows:
             return []
 
-        quiz_ids = sorted({str(r["quiz_id"]) for r in rows})
-        keys_by_quiz = self._question_keys(quiz_ids)
+        # Assignment attainment uses stored marks, not per-question drill-downs.
+        keys_by_quiz = {}
+        if assignment_id is None:
+            keys_by_quiz = self._question_keys(sorted({str(r["quiz_id"]) for r in rows}))
 
         grouped: dict[str, dict[str, Any]] = {}
         per_co: dict[str, dict[int, COMarks]] = defaultdict(dict)

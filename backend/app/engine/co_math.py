@@ -36,6 +36,7 @@ class COConfig:
     number: int
     threshold_pct: float  # a student's CO score at or above this counts as attained
     target_pct: float  # the share of the class that should reach the threshold
+    description: str = ""
 
 
 @dataclass(frozen=True)

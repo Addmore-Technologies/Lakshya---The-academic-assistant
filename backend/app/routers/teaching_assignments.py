@@ -3,7 +3,11 @@ from sqlalchemy import text
 
 from ..db import get_conn
 from ..deps import require_faculty
+from ..engine.co_math import build_co_sheet, class_summary, select_counted
+from ..engine.settings import load_grading_settings
 from ..errors import AppError
+from ..pg.analytics import PostgresAnalyticsStore
+from ..pg.common import as_uuid
 
 router = APIRouter(tags=["teaching-assignments"])
 
@@ -118,6 +122,36 @@ def get_assignment(
 ):
     row = _owned_assignment(conn, assignment_id, faculty["user_id"])
     return _serialize(row)
+
+
+@router.get("/teaching-assignments/{assignment_id}/attainment")
+def get_assignment_attainment(
+    assignment_id: str,
+    conn=Depends(get_conn),
+    faculty=Depends(require_faculty),
+):
+    assignment_id = as_uuid(assignment_id, "Teaching assignment")
+    assignment = _owned_assignment(conn, assignment_id, faculty["user_id"])
+    subject_id = str(assignment["subject_id"])
+    store = PostgresAnalyticsStore(conn)
+    cos = store.get_subject_cos(subject_id)
+    roster = store.get_subject_roster(subject_id, assignment_id=assignment_id)
+    attempts = store.get_subject_attempts(subject_id, assignment_id=assignment_id)
+    counted = select_counted(attempts, load_grading_settings().attempt_rule)
+    summaries = class_summary(build_co_sheet(counted, roster, cos), cos)
+    descriptions = {co.number: co.description for co in cos}
+    return {
+        "subject_id": subject_id,
+        "teaching_assignment_id": assignment_id,
+        "cos": [
+            {
+                "number": s.co,
+                "description": descriptions[s.co],
+                "attainment_pct": s.attainment_pct if s.has_data else None,
+            }
+            for s in summaries
+        ],
+    }
 
 
 @router.delete("/teaching-assignments/{assignment_id}")
