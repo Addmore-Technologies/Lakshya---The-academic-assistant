@@ -1,15 +1,74 @@
-// @lovable.dev/vite-tanstack-config already includes the following — do NOT add them manually
-// or the app will break with duplicate plugins:
-//   - TanStack devtools (dev-only, first), tanstackStart, viteReact, tailwindcss, tsConfigPaths,
-//     nitro (build-only using cloudflare as a default target), VITE_* env injection, @ path alias,
-//     React/TanStack dedupe, error logger plugins, and sandbox detection (port/host/strictPort).
-// You can pass additional config via defineConfig({ vite: { ... }, etc... }) if needed.
+
+// @lovable.dev/vite-tanstack-config already includes:
+// - TanStack devtools
+// - tanstackStart
+// - viteReact
+// - tailwindcss
+// - tsConfigPaths
+// - nitro
+// - VITE_* environment injection
+// - @ path alias
+// - React/TanStack deduplication
+// - Error logger plugins
+// - Sandbox detection
+//
+// Do NOT add these plugins manually.
+
 import { defineConfig } from "@lovable.dev/vite-tanstack-config";
 
 export default defineConfig({
   tanstackStart: {
-    // Redirect TanStack Start's bundled server entry to src/server.ts (our SSR error wrapper).
-    // nitro/vite builds from this
-    server: { entry: "server" },
+    // Custom SSR server entry
+    server: {
+      entry: "server",
+    },
+  },
+
+  vite: {
+    server: {
+      proxy: {
+        // Authentication endpoints
+        "/auth": {
+          target: "http://127.0.0.1:8000",
+          changeOrigin: true,
+        },
+
+        // Backend API endpoints
+        "/api": {
+          target: "http://127.0.0.1:8000",
+          changeOrigin: true,
+        },
+
+        "/subjects": {
+          target: "http://127.0.0.1:8000",
+          changeOrigin: true,
+        },
+        "/teaching-assignments": {
+          target: "http://127.0.0.1:8000",
+          changeOrigin: true,
+        },
+        "/quizzes": {
+          target: "http://127.0.0.1:8000",
+          changeOrigin: true,
+        },
+        "/attempts": {
+          target: "http://127.0.0.1:8000",
+          changeOrigin: true,
+        },
+        "/students": {
+          target: "http://127.0.0.1:8000",
+          changeOrigin: true,
+        },
+        "/uploads": {
+          target: "http://127.0.0.1:8000",
+          changeOrigin: true,
+        },
+        // Backend health endpoint
+        "/health": {
+          target: "http://127.0.0.1:8000",
+          changeOrigin: true,
+        },
+      },
+    },
   },
 });

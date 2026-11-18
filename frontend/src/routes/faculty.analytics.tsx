@@ -3,6 +3,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import { Download } from "lucide-react";
 import { Fragment, useState } from "react";
 import { Shell } from "@/components/lk/Shell";
+import { FacultyClasses } from "@/components/lk/FacultyClasses";
 import { Bar, Btn, Card, CO, PageHead } from "@/components/lk/ui";
 import { cn } from "@/lib/utils";
 import { ApiError, coSheet, subjects } from "@/lib/api";
@@ -27,6 +28,34 @@ export const Route = createFileRoute("/faculty/analytics")({
 
 function Page() {
   const [subjectId, setSubjectId] = useState<string | null>(() => getStoredSubjectId());
+  const [view, setView] = useState<"subject" | "class">("subject");
+  const subjectsQuery = useQuery({ queryKey: ["subjects"], queryFn: () => subjects.list() });
+  const options = subjectsQuery.data ?? [];
+  const subject = options.find((item) => item.id === subjectId) ?? options[0];
+  return (
+    <Shell role="faculty" subjectLabel={subject ? `${subject.code} · ${subject.name}` : undefined}>
+      <PageHead eyebrow="Reports · Attainment" title="CO sheet" right={subject && (
+        <div className="flex flex-wrap gap-3">
+          <select aria-label="Selected subject" className="rounded-full border px-4 py-2" value={subject.id}
+            onChange={(event) => { setSubjectId(event.target.value); storeSubjectId(event.target.value); }}>
+            {options.map((s) => <option key={s.id} value={s.id}>{s.code} — {s.name}</option>)}
+          </select>
+          <select aria-label="Report view" className="rounded-full border px-4 py-2" value={view}
+            onChange={(event) => setView(event.target.value === "class" ? "class" : "subject")}>
+            <option value="subject">Subject report</option>
+            <option value="class">Teaching assignment report</option>
+          </select>
+        </div>
+      )} />
+      {subjectsQuery.isError ? <p role="alert">Could not load subjects.</p>
+        : !subject ? <p>{subjectsQuery.isPending ? "Loading subjects…" : "No subjects assigned."}</p>
+        : view === "class" ? <FacultyClasses key={subject.id} subjectId={subject.id} />
+        : <SubjectReport key={subject.id} activeSubject={subject.id} />}
+    </Shell>
+  );
+}
+
+function SubjectReport({ activeSubject }: { activeSubject: string }) {
   const [scope, setScope] = useState<"semester" | "module">("semester");
   const [moduleId, setModuleId] = useState<string | null>(null);
   const [section, setSection] = useState<string>("");
@@ -34,12 +63,6 @@ function Page() {
   const [exporting, setExporting] = useState(false);
   const [expandedStudent, setExpandedStudent] = useState<string | null>(null);
 
-  const { data: subjectList } = useQuery({
-    queryKey: ["subjects"],
-    queryFn: () => subjects.list(),
-  });
-
-  const activeSubject = subjectId ?? subjectList?.[0]?.id ?? null;
 
   const { data: detail } = useQuery({
     queryKey: ["subject-detail", activeSubject],
@@ -145,92 +168,61 @@ function Page() {
     }
   };
 
-  if (!subjectList?.length) {
-    return (
-      <Shell role="faculty">
-        <PageHead eyebrow="Faculty" title="Analytics" sub="No subjects assigned." />
-      </Shell>
-    );
-  }
-
   return (
-    <Shell role="faculty" subjectLabel={detail ? `${detail.code} · ${detail.name}` : undefined}>
-      <PageHead
-        eyebrow="Reports · Attainment"
-        title="CO sheet"
-        right={
-          <div className="flex items-center gap-3">
-            {subjectList.length > 1 && (
-              <select
-                value={activeSubject ?? ""}
-                onChange={(e) => {
-                  const val = e.target.value || null;
-                  setSubjectId(val);
-                  if (val) storeSubjectId(val);
-                  setModuleId(null);
-                  setSection("");
-                }}
-                className="h-10 rounded-full border border-wine/30 bg-ivory px-4 text-sm text-wine"
-              >
-                {subjectList.map((s) => (
-                  <option key={s.id} value={s.id}>
-                    {s.code} — {s.name}
-                  </option>
-                ))}
-              </select>
-            )}
-            <div className="flex rounded-full bg-ivory p-1">
-              {(
-                [
-                  ["Semester", "semester"],
-                  ["Module", "module"],
-                ] as const
-              ).map(([label, val]) => (
-                <button
-                  key={val}
-                  onClick={() => {
-                    setScope(val);
-                    setModuleId(null);
-                    setSection("");
-                  }}
-                  className={cn(
-                    "rounded-full px-4 py-1.5 text-sm",
-                    scope === val ? "bg-wine text-ivory" : "text-wine hover:bg-beige/50",
-                  )}
-                >
-                  {label}
-                </button>
-              ))}
-            </div>
-            {scope === "module" && (
-              <select
-                value={moduleId ?? ""}
-                onChange={(e) => { setModuleId(e.target.value || null); setSection(""); }}
-                className="h-10 rounded-full border border-wine/30 bg-ivory px-4 text-sm text-wine"
-              >
-                <option value="">Select module</option>
-                {detail?.modules?.map((m) => (
-                  <option key={m.id} value={m.id}>
-                    M{m.number} — {m.title}
-                  </option>
-                ))}
-              </select>
-            )}
-            <select
-              value={section}
-              onChange={(e) => setSection(e.target.value)}
-              className="h-10 rounded-full border border-wine/30 bg-ivory px-4 text-sm text-wine"
+    <>
+      <p className="mb-3 text-sm text-muted-foreground">Subject-wide report. The enrollment label filter can include different classes that used the same label. Choose Teaching assignment report for a single class.</p>
+      <div className="mb-5 flex flex-wrap items-center gap-3">
+        <div className="flex rounded-full bg-ivory p-1">
+          {(
+            [
+              ["Semester", "semester"],
+              ["Module", "module"],
+            ] as const
+          ).map(([label, val]) => (
+            <button
+              key={val}
+              onClick={() => {
+                setScope(val);
+                setModuleId(null);
+                setSection("");
+              }}
+              className={cn(
+                "rounded-full px-4 py-1.5 text-sm",
+                scope === val ? "bg-wine text-ivory" : "text-wine hover:bg-beige/50",
+              )}
             >
-              <option value="">All sections</option>
-              {availableSections.map((value) => <option key={value} value={value}>{value}</option>)}
-            </select>
-            <Btn variant="secondary" onClick={handleExport} disabled={exporting || (scope === "module" && !moduleId)}>
-              <Download className="size-4" />
-              {exporting ? "Preparing…" : "Export to Excel"}
-            </Btn>
-          </div>
-        }
-      />
+              {label}
+            </button>
+          ))}
+        </div>
+        {scope === "module" && (
+          <select
+            value={moduleId ?? ""}
+            onChange={(e) => { setModuleId(e.target.value || null); setSection(""); }}
+            className="h-10 rounded-full border border-wine/30 bg-ivory px-4 text-sm text-wine"
+          >
+            <option value="">Select module</option>
+            {detail?.modules?.map((m) => (
+              <option key={m.id} value={m.id}>
+                M{m.number} — {m.title}
+              </option>
+            ))}
+          </select>
+        )}
+        <select
+          aria-label="Enrollment section label"
+          value={section}
+          onChange={(e) => setSection(e.target.value)}
+          className="h-10 rounded-full border border-wine/30 bg-ivory px-4 text-sm text-wine"
+        >
+          <option value="">All enrollment labels</option>
+          {availableSections.map((value) => <option key={value} value={value}>{value}</option>)}
+        </select>
+        <Btn variant="secondary" onClick={handleExport} disabled={exporting || (scope === "module" && !moduleId)}>
+          <Download className="size-4" />
+          {exporting ? "Preparing…" : "Export to Excel"}
+        </Btn>
+      </div>
       {error && <div role="alert" className="mb-4 rounded-xl border border-wine/20 bg-wine/5 px-4 py-3 text-sm text-wine">{error}</div>}
       <div className="grid grid-cols-12 gap-5">
         <Card className="col-span-7" title="Average score by CO">
@@ -407,6 +399,6 @@ function Page() {
           </div>
         ))}
       </div>
-    </Shell>
+    </>
   );
 }

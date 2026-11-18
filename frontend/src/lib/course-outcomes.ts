@@ -12,9 +12,8 @@ export function renumberCourseOutcomes(
 export function validateCourseOutcomeDraft(
   outcomes: ExtractedCourseOutcome[],
 ): string | null {
-  if (outcomes.length === 0) return "No Course Outcomes to save.";
-  if (outcomes.length > COURSE_OUTCOME_API_LIMIT) {
-    return `The current API supports at most ${COURSE_OUTCOME_API_LIMIT} Course Outcomes.`;
+  if (outcomes.length !== COURSE_OUTCOME_API_LIMIT) {
+    return `Every subject must have exactly ${COURSE_OUTCOME_API_LIMIT} Course Outcomes (CO1–CO6).`;
   }
   if (outcomes.some((outcome, index) => outcome.number !== index + 1 || !outcome.description.trim())) {
     return "Use sequential CO numbers starting at CO1 and add a description to every outcome.";

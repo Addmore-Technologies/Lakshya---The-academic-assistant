@@ -55,3 +55,27 @@ Introduction to Agile
 
     assert len(cos) == 1
     assert cos[0]["description"] == "Recommend quality metrics."
+
+
+def test_explicit_outcomes_take_precedence_over_other_sections():
+    text = """CO1: Ignore this earlier summary.
+Course Outcomes
+CO2: Apply Scrum practices.
+CO-PO/PSO Mapping:
+CO3: Not a syllabus outcome.
+"""
+    assert [(co["number"], co["description"]) for co in extract_cos_from_text(text)] == [
+        (2, "Apply Scrum practices.")
+    ]
+
+
+def test_headerless_list_does_not_include_mapping_or_out_of_range_rows():
+    text = """CO1 2 2 3 2
+CO6: Recommend quality metrics.
+CO7: Outside the supported range.
+CO-PO/PSO Mapping:
+CO2: This is a mapping note.
+"""
+    assert [(co["number"], co["description"]) for co in extract_cos_from_text(text)] == [
+        (6, "Recommend quality metrics.")
+    ]

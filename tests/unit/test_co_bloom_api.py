@@ -23,7 +23,17 @@ def test_faculty_save_and_retrieve_bloom(monkeypatch):
         sql = str(statement)
         result = MagicMock()
 
-        if "INSERT INTO course_outcomes" in sql:
+        assert params["sid"] == "test-subject"
+        if sql.startswith("SELECT threshold_pct, target_attainment_pct FROM course_outcomes"):
+            assert "WHERE subject_id = :sid AND number = :num" in sql
+            assert params["num"] == 1
+            result.mappings.return_value.fetchone.return_value = (
+                {k: stored[k] for k in ("threshold_pct", "target_attainment_pct")}
+                if stored else None
+            )
+
+        elif "INSERT INTO course_outcomes" in sql:
+            assert "ON CONFLICT (subject_id, number)" in sql
             stored.update({
                 "id": "test-co",
                 "subject_id": params["sid"],
@@ -37,6 +47,7 @@ def test_faculty_save_and_retrieve_bloom(monkeypatch):
             result.mappings.return_value.fetchone.return_value = stored.copy()
 
         elif "SELECT * FROM course_outcomes" in sql:
+            assert "WHERE subject_id = :sid" in sql
             result.mappings.return_value.fetchall.return_value = [
                 stored.copy()
             ]
@@ -59,26 +70,33 @@ def test_faculty_save_and_retrieve_bloom(monkeypatch):
 
     try:
         with TestClient(app) as client:
-            response = client.put(
-                "/subjects/test-subject/cos",
-                json={
-                    "cos": [{
-                        "number": 1,
-                        "description": "Apply Agile practices",
-                        "bloom_level": 3,
-                    }]
-                },
-            )
+            co = {"number": 1, "description": "Apply Agile practices", "bloom_level": 3}
+            url = "/subjects/test-subject/cos"
+            response = client.put(url, json={"cos": [co]})
 
             assert response.status_code == 200, response.text
             assert response.json()[0]["bloom_level"] == 3
             assert response.json()[0]["bloom_name"] == "Applying"
 
-            response = client.get("/subjects/test-subject/cos")
+            assert response.json()[0]["threshold_pct"] == 60
+            assert response.json()[0]["target_attainment_pct"] == 60
+
+            custom = {**co, "threshold_pct": 0, "target_attainment_pct": 85}
+            response = client.put(url, json={"cos": [custom]})
+            assert response.status_code == 200, response.text
+            updated = {**co, "description": "Apply Agile practices in teams"}
+            response = client.put(url, json={"cos": [updated]})
+            assert response.status_code == 200, response.text
+
+            response = client.get(url)
 
             assert response.status_code == 200, response.text
             assert response.json()[0]["bloom_level"] == 3
             assert response.json()[0]["bloom_name"] == "Applying"
+            assert response.json()[0]["threshold_pct"] == 0
+            assert response.json()[0]["target_attainment_pct"] == 85
+            assert response.json()[0]["subject_id"] == "test-subject"
+            assert response.json()[0]["description"] == updated["description"]
 
     finally:
         app.dependency_overrides.pop(get_conn, None)

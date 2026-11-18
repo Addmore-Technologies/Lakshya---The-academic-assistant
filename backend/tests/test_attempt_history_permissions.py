@@ -1,7 +1,9 @@
+import sqlite3
 from datetime import datetime, timezone
 from unittest.mock import MagicMock
 
 import pytest
+from sqlalchemy import create_engine
 
 from app.errors import AppError
 from app.routers.attempt_history import (
@@ -9,6 +11,8 @@ from app.routers.attempt_history import (
     my_attempt_history,
     class_attempt_history,
 )
+from app.routers.subjects import list_cos
+from app.routers.teaching_assignments import get_assignment_roster
 
 
 def test_student_history_filters_by_authenticated_student():
@@ -40,7 +44,7 @@ def test_non_student_cannot_access_student_history():
 
 def test_faculty_cannot_access_unowned_class_history():
     conn = MagicMock()
-    conn.execute.return_value.first.return_value = None
+    conn.execute.return_value.mappings.return_value.first.return_value = None
 
     with pytest.raises(AppError):
         class_attempt_history(
@@ -55,6 +59,44 @@ def test_faculty_cannot_access_unowned_class_history():
 
     assert "sub.faculty_user_id = :faculty_id" in str(sql)
     assert params["faculty_id"] == "faculty-1"
+
+
+def test_authorized_faculty_reads_only_selected_assignment_history():
+    # Real SQLAlchemy results: a MagicMock supports string indexing on any result.
+    engine = create_engine("sqlite://", connect_args={"detect_types": sqlite3.PARSE_DECLTYPES})
+    with engine.connect() as conn:
+        for statement in (
+            "CREATE TABLE subjects(id, faculty_user_id, code, name, semester)",
+            "CREATE TABLE teaching_assignments(id, subject_id, section, status)",
+            "CREATE TABLE course_outcomes(id, subject_id, number, description, threshold_pct, target_attainment_pct)",
+            "CREATE TABLE enrollments(student_id, subject_id, teaching_assignment_id, section, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
+            "CREATE TABLE students(id, usn, name)",
+            "CREATE TABLE quizzes(id, subject_id, title)",
+            "CREATE TABLE quiz_attempts(id, quiz_id, student_id, teaching_assignment_id, "
+            "attempt_number, total_score, max_score, started_at, submitted_at, answers)",
+            "INSERT INTO subjects VALUES ('s', 'faculty-1','CS','Computing','1')",
+            "INSERT INTO teaching_assignments VALUES ('a', 's', 'A', 'active'), ('b', 's', 'B', 'active')",
+            "INSERT INTO students VALUES ('1','U1','First'), ('2','U2','Second')",
+            "INSERT INTO enrollments(student_id,subject_id,teaching_assignment_id,section) "
+            "VALUES ('1','s','a','A'), ('2','s','b','B')",
+            "INSERT INTO quizzes VALUES ('q','s','Shared quiz')",
+            "INSERT INTO quiz_attempts (id,quiz_id,student_id,teaching_assignment_id,attempt_number) "
+            "VALUES ('attempt-a','q','1','a',1), ('attempt-b','q','2','b',1), ('legacy','q','1',NULL,2)",
+        ):
+            conn.exec_driver_sql(statement)
+        conn.exec_driver_sql("INSERT INTO course_outcomes VALUES (?, 's', ?, ?, 60, 60)",
+                             [(n, n, f'Outcome {n}') for n in range(1, 7)])
+        faculty = {"user_id": "faculty-1"}
+        for section, student in (("a", "1"), ("b", "2")):
+            roster = get_assignment_roster(section, conn, faculty)
+            assert [s["student_id"] for s in roster["students"]] == [student]
+            subject_id = roster["teaching_assignment"]["subject_id"]
+            assert [co["id"] for co in list_cos(subject_id, conn, faculty)] == list("123456")
+            history = class_attempt_history(section, conn, faculty)
+            assert [row["attempt_id"] for row in history] == [f"attempt-{section}"]
+            assert history[0]["student_id"] == student
+            assert history[0]["subject_id"] == "s"
+            assert history[0]["teaching_assignment_id"] == section
 
 
 def test_unsubmitted_history_hides_answers():

@@ -112,7 +112,7 @@ def class_attempt_history(
             "assignment_id": assignment_id,
             "faculty_id": faculty["user_id"],
         },
-    ).first()
+    ).mappings().first()
 
     if assignment is None:
         raise AppError(

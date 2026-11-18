@@ -8,13 +8,13 @@ import re
 from pypdf import PdfReader
 
 CO_ROW = re.compile(
-    r"^\s*(?:\d{1,2}\s*[.)]\s*)?CO\s*[-:]?\s*([1-6])\b"
+    r"^\s*(?:\d{1,2}\s*[.)]\s*)?CO\s*[-:]?\s*([0-9]+)\b"
     r"\s*[:.\-]?\s*",
     re.IGNORECASE,
 )
 
 SECTION_START = re.compile(
-    r"^\s*Course\s+Outcomes\s*:",
+    r"^\s*Course\s+Outcomes\s*(?::|$)",
     re.IGNORECASE,
 )
 
@@ -57,14 +57,13 @@ def _parse_row(number: int, content: str) -> dict | None:
             + content[bloom_match.end():]
         )
 
-    description = re.sub(r"\s+", " ", content).strip(" .|:-")
-    description = description.rstrip(".")
+    description = re.sub(r"\s+", " ", content).strip(" |:-")
 
     # Reject numeric CO-PO mapping rows and malformed descriptions.
     if len(description) < 15:
         return None
 
-    if len(re.findall(r"[A-Za-z]+", description)) < 4:
+    if len(re.findall(r"[A-Za-z]+", description)) < 3:
         return None
 
     return {
@@ -82,8 +81,12 @@ def extract_cos_from_text(text: str) -> list[dict]:
     lines = text.splitlines()
     results = {}
 
-    inside_section = False
-    saw_section = False
+    # Honor explicit sections anywhere in a document. Without a heading,
+    # accept a standalone list, not arbitrary CO references in course material.
+    first_line = next((line for line in lines if line.strip()), "")
+    inside_section = bool(CO_ROW.match(first_line)) and not any(
+        SECTION_START.match(line) for line in lines
+    )
     current_number = None
     current_parts = []
 
@@ -106,7 +109,6 @@ def extract_cos_from_text(text: str) -> list[dict]:
         if SECTION_START.match(stripped):
             finish_row()
             inside_section = True
-            saw_section = True
             continue
 
         if inside_section and SECTION_END.match(stripped):
@@ -121,7 +123,10 @@ def extract_cos_from_text(text: str) -> list[dict]:
 
         if match:
             finish_row()
-            current_number = int(match.group(1))
+            label = match.group(1)
+            if label not in {"1", "2", "3", "4", "5", "6"}:
+                continue  # A new row ends the previous one, even if out of range.
+            current_number = int(label)
             remainder = stripped[match.end():].strip()
             if remainder:
                 current_parts.append(remainder)
@@ -131,11 +136,6 @@ def extract_cos_from_text(text: str) -> list[dict]:
             current_parts.append(stripped)
 
     finish_row()
-
-    # Do not fall back to unrelated CO mapping tables.
-    if not saw_section:
-        return []
-
     return [results[n] for n in sorted(results)]
 
 

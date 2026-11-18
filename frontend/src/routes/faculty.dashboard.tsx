@@ -194,7 +194,7 @@ function Page() {
           </div>
         </div>
         <div className="paper col-span-12 p-5 sm:col-span-6 xl:col-span-3">
-          <div className="eyebrow">Class CO attainment</div>
+          <div className="eyebrow">Subject-wide CO attainment</div>
           <div className="display mt-2 text-5xl text-wine">{avgAttainment}%</div>
           <div className="mt-1 font-mono text-[11px] text-muted-foreground">
             Target {targetPct}%

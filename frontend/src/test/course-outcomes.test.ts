@@ -16,8 +16,10 @@ const outcome = (number: number, description: string): ExtractedCourseOutcome =>
 });
 
 describe("course outcome draft helpers", () => {
-  it("supports fewer than six outcomes without requiring six", () => {
-    expect(validateCourseOutcomeDraft([outcome(1, "Explain OS concepts")])).toBeNull();
+  const six = Array.from({ length: 6 }, (_, index) => outcome(index + 1, `Outcome ${index + 1}`));
+
+  it("accepts six completed outcomes", () => {
+    expect(validateCourseOutcomeDraft(six)).toBeNull();
   });
 
   it("renumbers outcomes sequentially after reordering", () => {
@@ -26,12 +28,12 @@ describe("course outcome draft helpers", () => {
   });
 
   it("rejects blank descriptions and non-sequential numbering", () => {
-    expect(validateCourseOutcomeDraft([outcome(1, " ")])).toMatch(/description/i);
-    expect(validateCourseOutcomeDraft([outcome(2, "Explain OS concepts")])).toMatch(/sequential/i);
+    expect(validateCourseOutcomeDraft([outcome(1, " "), ...six.slice(1)])).toMatch(/description/i);
+    expect(validateCourseOutcomeDraft([outcome(2, "Explain OS concepts"), ...six.slice(1)])).toMatch(/sequential/i);
   });
 
-  it("enforces the currently documented API maximum", () => {
-    const tooMany = Array.from({ length: COURSE_OUTCOME_API_LIMIT + 1 }, (_, index) => outcome(index + 1, `Outcome ${index + 1}`));
-    expect(validateCourseOutcomeDraft(tooMany)).toMatch(/at most/i);
+  it("rejects both incomplete and oversized drafts", () => {
+    expect(validateCourseOutcomeDraft(six.slice(1))).toMatch(/exactly 6/i);
+    expect(validateCourseOutcomeDraft([...six, outcome(COURSE_OUTCOME_API_LIMIT + 1, "Extra")])).toMatch(/exactly 6/i);
   });
 });

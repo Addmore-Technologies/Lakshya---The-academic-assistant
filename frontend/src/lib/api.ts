@@ -17,7 +17,7 @@ const configuredApiUrl = import.meta.env.VITE_API_URL?.trim();
 
 /** Backend API origin. Trailing slashes are removed to keep request URLs stable. */
 export const BASE_URL: string = (
-  configuredApiUrl || "https://lakshya-the-academic-assistant.onrender.com"
+  configuredApiUrl ?? ""
 ).replace(/\/+$/, "");
 
 /** Where to send the user when their session is no longer valid. */
@@ -787,6 +787,81 @@ export const subjects = {
       method: "PUT",
       body,
     });
+  },
+};
+
+// ── Teaching assignments ──
+
+export interface TeachingAssignment {
+  id: string;
+  subject_id: string;
+  section: string;
+  active: boolean;
+  status: "active" | "archived";
+  code: string;
+  subject_name: string;
+  semester: string;
+}
+
+export interface TeachingAssignmentRosterStudent {
+  student_id: string;
+  usn: string;
+  name: string;
+  section: string;
+  enrolled_at: string;
+}
+
+export interface TeachingAssignmentRoster {
+  teaching_assignment: TeachingAssignment;
+  total_students: number;
+  students: TeachingAssignmentRosterStudent[];
+}
+
+export interface AttemptHistoryItem {
+  attempt_id: string;
+  quiz_id: string;
+  quiz_title: string;
+  student_id: string;
+  usn: string;
+  student_name: string;
+  subject_id: string;
+  teaching_assignment_id: string | null;
+  section: string | null;
+  attempt_number: number;
+  total_score: number | null;
+  max_score: number | null;
+  started_at: string | null;
+  submitted_at: string | null;
+  answers: Record<string, number> | null;
+}
+
+export interface TeachingAssignmentAttainment {
+  subject_id: string;
+  teaching_assignment_id: string;
+  cos: Array<{ number: number; description: string; attainment_pct: number | null }>;
+}
+
+const assignmentCollection = "/teaching-assignments";
+
+function assignmentPath(id: string): string {
+  return `${assignmentCollection}/${encodeURIComponent(id)}`;
+}
+
+export const teachingAssignments = {
+  list() {
+    return apiRequest<TeachingAssignment[]>(assignmentCollection);
+  },
+
+  attainment(id: string) {
+    return apiRequest<TeachingAssignmentAttainment>(`${assignmentPath(id)}/attainment`);
+  },
+
+  attempts(id: string) {
+    return apiRequest<AttemptHistoryItem[]>(`${assignmentPath(id)}/attempts`);
+  },
+
+  roster(id: string) {
+    return apiRequest<TeachingAssignmentRoster>(`${assignmentPath(id)}/roster`);
   },
 };
 

@@ -5,6 +5,7 @@ import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { Toaster } from "@/components/ui/sonner";
 import { Shell } from "@/components/lk/Shell";
+import { FacultyClasses } from "@/components/lk/FacultyClasses";
 import { Bar, Btn, Card, Chip, CO, Field, inputCls, PageHead } from "@/components/lk/ui";
 import { cn } from "@/lib/utils";
 import { ApiError, modules, roster, subjects, upload } from "@/lib/api";
@@ -19,6 +20,7 @@ import type {
   ModuleSummary,
   RosterConfirm,
   RosterPreview,
+  Subject,
   SubjectDetail,
 } from "@/lib/api";
 
@@ -35,9 +37,46 @@ export const Route = createFileRoute("/faculty/upload")({
 });
 
 function Page() {
+  const [subjectId, setSubjectId] = useState(getStoredSubjectId);
+  const { data: subjectList } = useQuery({
+    queryKey: ["subjects"],
+    queryFn: () => subjects.list(),
+  });
+  const subject = subjectList?.find((s) => s.id === subjectId) ?? subjectList?.[0];
+  if (!subject || !subjectList) {
+    return (
+      <Shell role="faculty">
+        <PageHead eyebrow="Faculty" title="Upload" sub="No subjects assigned." />
+      </Shell>
+    );
+  }
+  // Pin the fallback: a list refresh can reorder subjects without changing assignments.
+  if (subject.id !== subjectId) setSubjectId(subject.id);
+  return (
+    <SubjectUpload
+      key={subject.id}
+      activeSubject={subject.id}
+      subjectList={subjectList}
+      onSwitch={(id) => {
+        storeSubjectId(id);
+        setSubjectId(id);
+      }}
+    />
+  );
+}
+
+function SubjectUpload({ activeSubject, subjectList, onSwitch }: {
+  activeSubject: string;
+  subjectList: Subject[];
+  onSwitch: (id: string) => void;
+}) {
   const queryClient = useQueryClient();
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const [subjectId, setSubjectId] = useState<string | null>(() => getStoredSubjectId());
+  const mounted = useRef(false);
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
   const [selectedModule, setSelectedModule] = useState<string | null>(null);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [isUploading, setIsUploading] = useState(false);
@@ -58,13 +97,6 @@ function Page() {
   const [rosterPreview, setRosterPreview] = useState<RosterPreview | null>(null);
   const [rosterConfirming, setRosterConfirming] = useState(false);
   const [rosterResult, setRosterResult] = useState<RosterConfirm | null>(null);
-
-  const { data: subjectList } = useQuery({
-    queryKey: ["subjects"],
-    queryFn: () => subjects.list(),
-  });
-
-  const activeSubject = subjectId ?? subjectList?.[0]?.id ?? null;
 
   const { data: detail, isLoading: detailLoading, isError: detailError, refetch: refetchDetail } = useQuery<SubjectDetail>({
     queryKey: ["subject-detail", activeSubject],
@@ -219,6 +251,8 @@ function Page() {
       setRosterResult(result);
       setRosterPreview(null);
       queryClient.invalidateQueries({ queryKey: ["subjects"] });
+      queryClient.invalidateQueries({ queryKey: ["teaching-assignments"] });
+      queryClient.invalidateQueries({ queryKey: ["class-report", activeSubject] });
       toast.success(`${result.created_enrollments} students enrolled.`);
     } catch (e) {
       if (e instanceof ApiError) toast.error(e.message);
@@ -228,10 +262,10 @@ function Page() {
     }
   };
 
+  const canEditCOs = detail?.id === activeSubject && !detailLoading && !detailError && !savingCOs && !extractingCOs;
   const handleSaveCOs = async () => {
-    if (!activeSubject || !coPreview || savingCOs || extractingCOs) return;
+    if (!canEditCOs) return;
 
-    // The current backend enforces a maximum of six, but subjects may have fewer.
     const draftError = validateCourseOutcomeDraft(editedCOs);
     if (draftError) {
       toast.error(draftError);
@@ -297,8 +331,10 @@ function Page() {
         queryClient.invalidateQueries({
           queryKey: ["subject-cos", activeSubject],
         }),
+        queryClient.invalidateQueries({ queryKey: ["class-report", activeSubject] }),
       ]);
 
+      if (!mounted.current) return;
       setCoPreview(null);
       setEditedCOs([]);
       setSyllabusFile(null);
@@ -306,13 +342,14 @@ function Page() {
 
       toast.success(`${saved.length} Course Outcomes saved successfully.`);
     } catch (error) {
+      if (!mounted.current) return;
       toast.error(
         error instanceof ApiError
           ? error.message
           : "Could not save Course Outcomes.",
       );
     } finally {
-      setSavingCOs(false);
+      if (mounted.current) setSavingCOs(false);
     }
   };
 
@@ -335,6 +372,11 @@ function Page() {
 
     try {
       const result = await subjects.extractCOs(activeSubject, syllabusFile);
+      if (!mounted.current) return;
+      if (result.subject_id !== undefined && result.subject_id !== activeSubject) {
+        setCoExtractionError("The extracted outcomes belong to a different subject. Retry extraction for the selected subject.");
+        return;
+      }
       setCoPreview(result);
       setEditedCOs(result.cos.slice(0, COURSE_OUTCOME_API_LIMIT).map((co, index) => ({ ...co, number: index + 1 })));
       if (result.count > COURSE_OUTCOME_API_LIMIT) {
@@ -342,21 +384,14 @@ function Page() {
       }
       toast.success(`Extracted ${result.count} Course Outcomes for review.`);
     } catch (error) {
+      if (!mounted.current) return;
       const message = error instanceof ApiError ? error.message : "Could not extract Course Outcomes from the syllabus.";
       setCoExtractionError(message);
       toast.error(message);
     } finally {
-      setExtractingCOs(false);
+      if (mounted.current) setExtractingCOs(false);
     }
   };
-
-  if (!subjectList?.length) {
-    return (
-      <Shell role="faculty">
-        <PageHead eyebrow="Faculty" title="Upload" sub="No subjects assigned." />
-      </Shell>
-    );
-  }
 
   return (
     <Shell role="faculty" subjectLabel={detail ? `${detail.code} · ${detail.name}` : undefined}>
@@ -367,19 +402,16 @@ function Page() {
         sub="Upload a module deck. Lakshya splits it into chunks and maps each to course outcomes."
         right={
           <select
+            aria-label="Selected subject"
             value={activeSubject ?? ""}
             disabled={extractingCOs || savingCOs}
             onChange={(e) => {
               const val = e.target.value || null;
-              setSubjectId(val);
-              if (val) storeSubjectId(val);
-              setSelectedModule(null);
-              setSelectedFile(null);
-              setUploadError(null);
-              setSyllabusFile(null);
-              setCoPreview(null);
-              setEditedCOs([]);
-              setCoExtractionError(null);
+              if (!val || val === activeSubject || extractingCOs || savingCOs) return;
+              if ((syllabusFile || coPreview || editedCOs.length > 0) && !window.confirm(
+                "Discard this subject’s unsaved Course Outcome work and switch subjects? Approved outcomes will not change.",
+              )) return;
+              onSwitch(val);
             }}
             className="h-10 rounded-full border border-wine/30 bg-ivory px-4 text-sm text-wine disabled:cursor-not-allowed disabled:opacity-50"
           >
@@ -392,6 +424,7 @@ function Page() {
         }
       />
       <div className="grid grid-cols-12 gap-5">
+        <FacultyClasses subjectId={activeSubject} />
         {/* Subject-specific Course Outcome upload, review and approval */}
         <Card className="col-span-12" title="Course Outcomes">
           <div className="space-y-5">
@@ -440,6 +473,31 @@ function Page() {
             </div>
 
             <div className="flex flex-wrap items-center gap-3">
+              <Btn
+                type="button"
+                variant="secondary"
+                disabled={!canEditCOs}
+                onClick={() => {
+                  setCoPreview(null);
+                  setSyllabusFile(null);
+                  setCoExtractionError(null);
+                  setEditedCOs(
+                    Array.from({ length: COURSE_OUTCOME_API_LIMIT }, (_, index) => {
+                      const existing = detail?.cos?.find((co) => co.number === index + 1);
+                      return {
+                        number: index + 1,
+                        description: existing?.description ?? "",
+                        bloom_level: existing?.bloom_level ?? null,
+                        bloom_name: existing?.bloom_name ?? null,
+                        threshold_pct: existing?.threshold_pct ?? 60,
+                        target_attainment_pct: existing?.target_attainment_pct ?? 60,
+                      };
+                    }),
+                  );
+                }}
+              >
+                <Plus className="size-4" /> Enter COs Manually
+              </Btn>
               <label className="flex min-h-11 cursor-pointer items-center gap-2 rounded-full border border-wine/30 bg-background px-4 text-sm text-wine hover:bg-beige/40">
                 <UploadCloud className="size-4" />
                 Choose syllabus PDF, PPT, PPTX, or JPG
@@ -482,15 +540,15 @@ function Page() {
               </div>
             )}
 
-            {coPreview && (
-              <section aria-label="Extracted Course Outcome draft" className="space-y-4 rounded-2xl border border-wine/20 p-4">
+            {editedCOs.length > 0 && (
+              <section aria-label="Course Outcome draft" className="space-y-4 rounded-2xl border border-wine/20 p-4">
                 <div className="flex flex-wrap items-start justify-between gap-2">
                   <div>
                     <div className="flex items-center gap-2 text-sm font-semibold text-wine">
-                      <FileText className="size-4" /> Extracted draft · {coPreview.count} detected
+                      <FileText className="size-4" /> {coPreview ? `Extracted draft · ${coPreview.count} detected` : "Manual CO draft"}
                     </div>
                     <p className="mt-1 text-xs text-muted-foreground">
-                      Source: {coPreview.filename ?? syllabusFile?.name ?? "Uploaded syllabus"} · Not yet approved
+                      Source: {coPreview?.filename ?? (coPreview ? syllabusFile?.name : "Manual entry") ?? "Uploaded syllabus"} · Not yet approved
                     </p>
                   </div>
                   <Chip s="Draft" />
@@ -503,12 +561,12 @@ function Page() {
                       <div className="flex items-center gap-1">
                         <Btn type="button" variant="ghost" size="sm" aria-label={`Move CO${co.number} up`} disabled={index === 0 || savingCOs} onClick={() => setEditedCOs((current) => {
                           const next = [...current];
-                          [next[index - 1], next[index]] = [next[index], next[index - 1]];
+                          [next[index - 1], next[index]] = [next[index]!, next[index - 1]!];
                           return renumberCourseOutcomes(next);
                         })}><ArrowUp className="size-4" /></Btn>
                         <Btn type="button" variant="ghost" size="sm" aria-label={`Move CO${co.number} down`} disabled={index === editedCOs.length - 1 || savingCOs} onClick={() => setEditedCOs((current) => {
                           const next = [...current];
-                          [next[index + 1], next[index]] = [next[index], next[index + 1]];
+                          [next[index + 1], next[index]] = [next[index]!, next[index + 1]!];
                           return renumberCourseOutcomes(next);
                         })}><ArrowDown className="size-4" /></Btn>
                         <Btn type="button" variant="ghost" size="sm" aria-label={`Remove CO${co.number} from draft`} disabled={savingCOs} onClick={() => setEditedCOs((current) => renumberCourseOutcomes(current.filter((_, i) => i !== index)))}><Trash2 className="size-4" /></Btn>
@@ -520,6 +578,7 @@ function Page() {
                         className={cn(inputCls, "w-full min-h-24")}
                         value={co.description}
                         aria-label={`CO${co.number} description`}
+                        disabled={savingCOs}
                         onChange={(event) => setEditedCOs((current) => current.map((item, i) => i === index ? { ...item, description: event.target.value } : item))}
                       />
                     </Field>
@@ -528,6 +587,7 @@ function Page() {
                         className={cn(inputCls, "w-full")}
                         value={co.bloom_level ?? ""}
                         aria-label={`CO${co.number} Bloom taxonomy level`}
+                        disabled={savingCOs}
                         onChange={(event) => {
                           const value = event.target.value;
                           const level = value ? Number(value) : null;
@@ -551,7 +611,7 @@ function Page() {
                   <Btn type="button" variant="secondary" disabled={editedCOs.length >= COURSE_OUTCOME_API_LIMIT || savingCOs} onClick={() => setEditedCOs((current) => renumberCourseOutcomes([...current, { number: current.length + 1, description: "", bloom_level: null, bloom_name: null, threshold_pct: 60, target_attainment_pct: 60 }]))}>
                     <Plus className="size-4" /> Add outcome {editedCOs.length >= COURSE_OUTCOME_API_LIMIT ? "(API limit reached)" : ""}
                   </Btn>
-                  <Btn onClick={() => void handleSaveCOs()} disabled={savingCOs || extractingCOs || !editedCOs.length || coPreview.count > COURSE_OUTCOME_API_LIMIT}>
+                  <Btn onClick={() => void handleSaveCOs()} disabled={!canEditCOs || editedCOs.length !== COURSE_OUTCOME_API_LIMIT}>
                     {savingCOs ? "Saving Course Outcomes…" : "Approve & Save Course Outcomes"}
                   </Btn>
                 </div>
@@ -947,12 +1007,11 @@ function Page() {
         </Card>
 
         {/* Roster upload */}
-        <Card className="col-span-12" title="Roster upload">
+        <Card className="col-span-12" title="Subject roster import">
           {!rosterPreview && !rosterResult ? (
             <div>
               <p className="text-sm text-muted-foreground">
-                Upload a CSV roster to enrol students. The file is previewed before any changes are
-                applied.
+                Import students into this subject. Each CSV row’s section determines its class, not the class selected above. Review the preview before confirming.
               </p>
               <div className="mt-4 flex items-center gap-3">
                 <input
