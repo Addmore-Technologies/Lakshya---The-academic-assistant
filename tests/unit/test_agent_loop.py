@@ -105,6 +105,17 @@ def test_student_never_receives_faculty_tool_schema():
     assert exposed_names == ["my_progress"]
 
 
+def test_generation_error_is_not_reported_as_saved_drafts():
+    tool = read_tool(name="generate_quiz", roles=("faculty",), mutates=True, review_required=True,
+                     handler=lambda *_: {"error": {"code": "NO_PROCESSED_CONTENT"}})
+    client = FakeClient([response(tool_calls=[call(tool.name, {"topic": "Stacks"})]),
+                         response(content="Process the module slides first.")])
+    result = AgentLoop(client, model="test", tools=ToolRegistry([tool])).run(
+        {"user_id": "u1", "role": "faculty"}, "Generate question drafts")
+    assert result.tool_calls == [{"name": "generate_quiz", "status": "error"}]
+    assert result.drafts == []
+
+
 def test_student_cannot_pass_another_students_usn_to_tool():
     calls = []
     student_progress = read_tool(

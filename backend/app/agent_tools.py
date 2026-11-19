@@ -24,12 +24,14 @@ from __future__ import annotations
 
 import json
 import os
-from types import SimpleNamespace
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field
 
 from .errors import AppError
+from .pg.chunks import module_chunks_with_co, subject_cos
+from .pg.common import as_uuid
+from .services.question_draft_review import suspect_deck
 from .engine.co_math import AttemptScore, COConfig, StudentInfo
 from .services.co_analytics import (
     AnalyticsStore,
@@ -44,7 +46,7 @@ from .services.quizzes import ForbiddenError, NotFoundError  # noqa: F401 (re-ex
 from ai.quiz_generation import generate_quiz as _ai_generate_quiz, QuizGenerationError
 from ai.token_factory import TokenFactoryClient
 from sqlalchemy import text
-from sqlalchemy.exc import DataError
+
 
 
 # ---------------------------------------------------------------------------
@@ -96,17 +98,11 @@ class ExportSheetArgs(BaseModel):
 class GenerateQuizArgs(BaseModel):
     """Arguments for generate_quiz."""
 
-    module_id: str = Field(..., description="UUID of the module")
-    co_id: str = Field(..., description="UUID of the CO to generate questions for")
-    difficulty: str | None = Field(default="medium", description="easy, medium, or hard")
-    count: int = Field(default=5, ge=1, le=50, description="Number of questions to generate")
+    model_config = ConfigDict(extra="forbid")
 
-    @field_validator("difficulty")
-    @classmethod
-    def _check_difficulty(cls, v: str | None) -> str | None:
-        if v is not None and v not in ("easy", "medium", "hard"):
-            raise ValueError("difficulty must be 'easy', 'medium', or 'hard'")
-        return v
+    module_id: str = Field(min_length=1, description="UUID of the module")
+    difficulty: Literal["easy", "medium", "hard"]
+    count: int = Field(strict=True, ge=1, le=20, description="Number of questions to generate")
 
 
 # ---------------------------------------------------------------------------
@@ -252,9 +248,9 @@ def generate_quiz(
     current_user: dict[str, Any],
     conn: Any,
 ) -> list[str]:
-    """Generate AI questions for a CO and save them as drafts.
+    """Generate AI questions from a faculty-owned module and save them as drafts.
 
-    Faculty only.  Reads the module and CO rows from the DB, builds a
+    Faculty only. Reads the module's slides and subject's CO definitions, builds a
     TokenFactoryClient from env vars, and calls Danwin's
     ``ai.quiz_generation.generate_quiz``.  Generated questions are
     inserted with ``status='draft'`` and ``source='AI'`` so they will NOT
@@ -271,67 +267,28 @@ def generate_quiz(
 
     faculty_user_id = current_user["user_id"]
 
-    # Verify the module belongs to a subject the faculty owns, and load the
-    # module title + CO number/description needed by the generation function.
-    try:
-        mod_row = conn.execute(
-            text(
-                "SELECT m.id, m.subject_id, m.title, "
-                "c.id AS co_id, c.number AS co_number, c.description "
-                "FROM modules m "
-                "JOIN subjects s ON s.id = m.subject_id "
-                "JOIN course_outcomes c ON c.subject_id = s.id "
-                "WHERE m.id = :mid AND s.faculty_user_id = :fid AND c.id = :cid"
-            ),
-            {"mid": str(args.module_id), "cid": str(args.co_id),
-             "fid": faculty_user_id},
-        ).mappings().fetchone()
-    except DataError:
-        raise AppError(404, "NOT_FOUND",
-                       "Module or CO not found, or faculty does not own the subject.")
+    module = conn.execute(
+        text("SELECT m.id, m.title, m.subject_id, m.processing_status, s.name AS subject_name, "
+             "s.code AS subject_code FROM modules m JOIN subjects s ON s.id = m.subject_id "
+             "WHERE m.id = :mid AND s.faculty_user_id = :fid"),
+        {"mid": as_uuid(args.module_id, "Module"), "fid": faculty_user_id},
+    ).mappings().fetchone()
+    if module is None:
+        raise AppError(404, "NOT_FOUND", "Module not found")
+    module_id = str(module["id"])
+    if module["processing_status"] != "done":
+        raise AppError(422, "NO_PROCESSED_CONTENT", "Process the module's PPTX before generating questions.")
 
-    if mod_row is None:
-        raise AppError(404, "NOT_FOUND",
-                       "Module or CO not found, or faculty does not own the subject.")
-
-    module_id = str(args.module_id)
-    co_id = str(args.co_id)
-    co_number = mod_row["co_number"]
-
-    # Retrieve slide content tagged to the selected Course Outcome.
-    from backend.app.pg.chunks import module_chunks_with_co
-
-    module_chunks = module_chunks_with_co(conn, module_id)
-
-    matching_chunks = [
-        chunk for chunk in module_chunks
-        if chunk["co_id"] == co_id and chunk["text"].strip()
+    slides = [
+        {"slide_number": chunk["slide_number"], "text": chunk["text"]}
+        for chunk in module_chunks_with_co(conn, module_id) if chunk["text"].strip()
     ]
-
-    if not matching_chunks:
-        raise AppError(
-            422,
-            "NO_TAGGED_CONTENT",
-            "No slides are tagged to this Course Outcome. "
-            "Upload and process a PPTX before generating questions."
-        )
-
-    slide_context = "\n\n".join(
-        f"Slide {chunk['slide_number']}: {chunk['text']}"
-        for chunk in matching_chunks
-    )
-
-    # Supply the actual CO-tagged slide content to the AI generator.
-    module_obj = SimpleNamespace(
-        id=module_id,
-        title=mod_row["title"] or "",
-        description=slide_context,
-    )
-    co_obj = SimpleNamespace(
-        id=co_id,
-        number=co_number,
-        description=mod_row["description"] or "",
-    )
+    if not slides:
+        raise AppError(422, "NO_PROCESSED_CONTENT", "The module has no extracted slide text to generate questions from.")
+    if suspect_deck(module["title"], module["subject_name"], slides):
+        raise AppError(409, "MODULE_CONTENT_MISMATCH",
+                       "The slides may belong to a different module. Check them in the faculty review form.")
+    outcomes = subject_cos(conn, str(module["subject_id"]))
 
     # Read configuration from env, mapping missing values to clean errors
     api_key = _require_env("TOKEN_FACTORY_API_KEY")
@@ -351,9 +308,9 @@ def generate_quiz(
     )
     try:
         generated = _ai_generate_quiz(
-            module=module_obj,
-            co=co_obj,
-            difficulty=args.difficulty or "medium",
+            module={"id": module_id, "title": module["title"], "slides": slides},
+            course_outcomes=outcomes,
+            difficulty=args.difficulty,
             count=args.count,
             client=client,
             model=model,
@@ -377,21 +334,23 @@ def generate_quiz(
             text(
                 "INSERT INTO questions "
                 "(module_id, co_id, stem, options, correct_option, explanation, "
-                "marks, difficulty, bloom_level, status, source, created_by) "
+                "marks, difficulty, bloom_level, status, source, created_by, source_slide_number, source_quote) "
                 "VALUES "
                 "(:mid, :cid, :stem, CAST(:opts AS jsonb), :co, :expl, "
-                ":marks, :diff, :bloom, 'draft', 'AI', :cb) "
+                ":marks, :diff, :bloom, 'draft', 'AI', :cb, :slide, :quote) "
                 "RETURNING id"
             ),
             {
                 "mid": module_id,
-                "cid": co_id,
+                "cid": q["co_id"],
+                "slide": q["source_slide_number"],
+                "quote": q["source_quote"],
                 "stem": q["stem"],
                 "opts": json.dumps(q["options"]),
                 "co": q["correct_option"],
                 "expl": q.get("explanation"),
                 "marks": q.get("marks", 1.0),
-                "diff": q.get("difficulty") or args.difficulty or "medium",
+                "diff": args.difficulty,
                 "bloom": q.get("bloom_level") or "understand",
                 "cb": faculty_user_id,
             },

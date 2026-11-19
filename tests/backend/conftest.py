@@ -223,10 +223,17 @@ def ctx(db, client):
 
     # ---- Enrollment ----
     def make_enrollment(student_id, subject_id, section="A"):
+        # Quiz attempts snapshot the active class, not just the subject.
+        db.execute(
+            text("INSERT INTO teaching_assignments (subject_id, section) "
+                 "VALUES (:subj, :sec) ON CONFLICT DO NOTHING"),
+            {"subj": subject_id, "sec": section},
+        )
         db.execute(
             text(
-                "INSERT INTO enrollments (student_id, subject_id, section) "
-                "VALUES (:sid, :subj, :sec)"
+                "INSERT INTO enrollments (student_id, subject_id, section, teaching_assignment_id) "
+                "SELECT :sid, subject_id, section, id FROM teaching_assignments "
+                "WHERE subject_id = :subj AND section = :sec AND status = 'active'"
             ),
             {"sid": student_id, "subj": subject_id, "sec": section},
         )

@@ -1,4 +1,6 @@
-from fastapi import APIRouter, Body, Depends
+import secrets
+
+from fastapi import APIRouter, Body, Depends, File, UploadFile
 from sqlalchemy import text
 
 from ..db import get_conn
@@ -7,7 +9,10 @@ from ..engine.co_math import build_co_sheet, class_summary, select_counted
 from ..engine.settings import load_grading_settings
 from ..errors import AppError
 from ..pg.analytics import PostgresAnalyticsStore
+
 from ..pg.common import as_uuid
+from ..security import hash_password
+from ..services.student_import import parse_student_file
 
 router = APIRouter(tags=["teaching-assignments"])
 

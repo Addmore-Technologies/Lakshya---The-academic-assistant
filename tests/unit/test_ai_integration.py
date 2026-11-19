@@ -4,7 +4,7 @@ import io
 import json
 from types import SimpleNamespace
 
-from ai.integration import build_question_batch_payload, build_upload_tagger
+from ai.integration import build_question_batch_payload, build_upload_tagger, generate_and_save_quiz_drafts
 from app.pipeline.memory_store import InMemoryChunkStore
 from app.pipeline.upload import COInfo, process_module_upload
 from tests.unit.helpers import build_deck
@@ -98,6 +98,24 @@ def test_generated_ai_questions_map_to_batch_endpoint_as_drafts_only():
     assert payload["questions"][0]["co_id"] == "co-1"
     assert "status" not in payload["questions"][0]
     assert "source" not in payload["questions"][0]
+
+
+def test_unmapped_draft_can_be_saved_without_assigning_a_fallback():
+    module = {"id": "m", "title": "Algorithms", "slides": [{"slide_number": 3, "text": "Binary search"}]}
+    outcomes = [{"id": "c", "number": 1, "description": "Analyze algorithms"}]
+
+    def generate(module_arg, outcomes_arg, difficulty, count):
+        assert (module_arg, outcomes_arg, difficulty, count) == (module, outcomes, "easy", 1)
+        return [{"module_id": "m", "co_id": None, "co_number": None, "stem": "Q?",
+                 "options": ["A", "B", "C", "D"], "correct_option": 0, "status": "draft", "source": "AI",
+                 "source_slide_number": 3, "source_quote": "Binary search"}]
+
+    saved = []
+    generate_and_save_quiz_drafts(module=module, course_outcomes=outcomes, difficulty="easy", count=1,
+                                  generator=generate, save_batch=saved.append)
+    assert saved == [{"questions": [{"module_id": "m", "co_id": None, "stem": "Q?",
+                                     "options": ["A", "B", "C", "D"], "correct_option": 0,
+                                     "source_slide_number": 3, "source_quote": "Binary search"}]}]
 
 
 def test_batch_payload_refuses_non_draft_or_non_ai_question():

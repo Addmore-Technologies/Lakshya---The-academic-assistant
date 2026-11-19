@@ -53,6 +53,8 @@ def _make_store(cos, roster, attempts, progress_map=None):
 # ---------------------------------------------------------------------------
 
 _FAKE_QUESTION = {
+    "source_slide_number": 1,
+    "source_quote": "A stack follows Last In First Out (LIFO).",
     "stem": "Test question stem?",
     "options": ["Option A", "Option B", "Option C", "Option D"],
     "correct_option": 0,
@@ -78,17 +80,22 @@ def fake_ai(monkeypatch):
         def close(self):
             pass
 
-    def fake_generate_quiz(module, co, difficulty, count, client, *, model,
+    calls = []
+
+    def fake_generate_quiz(module, course_outcomes, difficulty, count, client, *, model,
                            usage_recorder=None):
+        calls.append((module, course_outcomes))
         if usage_recorder is not None:
             usage_recorder({"step": "quiz_generation", "model": model,
                             "prompt_tokens": 10, "completion_tokens": 20,
                             "total_tokens": 30})
-        return [_FAKE_QUESTION.copy() for _ in range(count)]
+        mappings = [co["id"] for co in course_outcomes] or [None]
+        return [dict(_FAKE_QUESTION, co_id=mappings[i % len(mappings)]) for i in range(count)]
 
     import backend.app.agent_tools as at
     monkeypatch.setattr(at, "_ai_generate_quiz", fake_generate_quiz)
     monkeypatch.setattr(at, "TokenFactoryClient", FakeClient)
+    return calls
 
 
 @pytest.fixture
@@ -312,6 +319,7 @@ def test_export_sheet_student_forbidden():
 def tagged_slide(db):
     """Create a CO-tagged slide for quiz-generation tests."""
     def create(module_id, co_id):
+        db.execute(text("UPDATE modules SET processing_status = 'done' WHERE id = :mid"), {"mid": module_id})
         chunk_id = db.execute(
             text(
                 "INSERT INTO content_chunks "
@@ -351,18 +359,29 @@ def test_generate_quiz_faculty_creates_drafts(db, ctx, fake_ai, tagged_slide):
     tagged_slide(mod["module_id"], co["co_id"])
 
     user = {"user_id": faculty["user_id"], "role": "faculty"}
-    args = GenerateQuizArgs(module_id=mod["module_id"], co_id=co["co_id"],
-                            difficulty="medium", count=3)
+    second_co = ctx.make_co(subj["subject_id"], 2, "Explain queue operations")
+    other_subj = ctx.make_subject(faculty["user_id"])
+    other_co = ctx.make_co(other_subj["subject_id"], 1, "Unrelated outcome")
+    other_mod = ctx.make_module(other_subj["subject_id"], 1, "Other module")
+    tagged_slide(other_mod["module_id"], other_co["co_id"])
+    db.execute(text("INSERT INTO content_chunks (module_id, slide_number, text) "
+                    "VALUES (:mid, 2, 'Queues are FIFO.'), (:mid, 3, '   ')"), {"mid": mod["module_id"]})
+    args = GenerateQuizArgs(module_id=mod["module_id"], difficulty="medium", count=2)
 
     created_ids = generate_quiz(args, user, db)
-    assert len(created_ids) == 3
+    assert len(created_ids) == 2
+    (module, outcomes), = fake_ai
+    assert [s["slide_number"] for s in module["slides"]] == [1, 2]
+    assert module["slides"][1]["text"] == "Queues are FIFO."
+    assert [(o["id"], o["description"]) for o in outcomes] == [
+        (co["co_id"], "CO1"), (second_co["co_id"], "Explain queue operations")]
 
-    # Verify each question is a draft with source='AI'
-    for qid in created_ids:
+    for qid, expected_co in zip(created_ids, (co, second_co), strict=True):
         row = db.execute(
-            text("SELECT status, source FROM questions WHERE id = :id"),
+            text("SELECT status, source, co_id FROM questions WHERE id = :id"),
             {"id": qid},
         ).mappings().fetchone()
+        assert str(row["co_id"]) == expected_co["co_id"]
         assert row["status"] == "draft"
         assert row["source"] == "AI"
 
@@ -371,22 +390,22 @@ def test_generate_quiz_student_forbidden(db, ctx):
     """Students cannot call generate_quiz."""
     user = {"user_id": "stu-1", "role": "student", "student_id": "stu-1", "usn": "1STU001"}
     import uuid as _uuid
-    args = GenerateQuizArgs(module_id=str(_uuid.uuid4()), co_id=str(_uuid.uuid4()), count=2)
+    args = GenerateQuizArgs(module_id=str(_uuid.uuid4()), difficulty="easy", count=2)
     with pytest.raises(AppError) as exc:
         generate_quiz(args, user, db)
     assert exc.value.status_code == 403
 
 
-def test_generate_quiz_validates_count():
-    """Pydantic validation: count must be >= 1."""
+@pytest.mark.parametrize("count", [0, 21])
+def test_generate_quiz_validates_count(count):
     with pytest.raises(ValueError):
-        GenerateQuizArgs(module_id="m1", co_id="c1", count=0)
+        GenerateQuizArgs(module_id="m1", difficulty="easy", count=count)
 
 
 def test_generate_quiz_validates_difficulty():
     """Pydantic validation: difficulty must be easy/medium/hard."""
     with pytest.raises(ValueError):
-        GenerateQuizArgs(module_id="m1", co_id="c1", count=3, difficulty="insane")
+        GenerateQuizArgs(module_id="m1", count=3, difficulty="insane")
 
 
 def test_generate_quiz_invalid_module(db, ctx, fake_ai):
@@ -394,7 +413,7 @@ def test_generate_quiz_invalid_module(db, ctx, fake_ai):
     import uuid as _uuid
     faculty = ctx.make_faculty()
     user = {"user_id": faculty["user_id"], "role": "faculty"}
-    args = GenerateQuizArgs(module_id=str(_uuid.uuid4()), co_id=str(_uuid.uuid4()), count=2)
+    args = GenerateQuizArgs(module_id=str(_uuid.uuid4()), difficulty="medium", count=2)
     with pytest.raises(AppError) as exc:
         generate_quiz(args, user, db)
     assert exc.value.status_code == 404
@@ -406,11 +425,10 @@ def test_generate_quiz_module_not_owned(db, ctx, fake_ai):
     faculty_b = ctx.make_faculty()
     subj_a = ctx.make_subject(faculty_a["user_id"])
     mod_a = ctx.make_module(subj_a["subject_id"], 1, "Owned Module")
-    co_a = ctx.make_co(subj_a["subject_id"], 1, "Owned CO")
 
     # Faculty B tries to generate for Faculty A's module
     user_b = {"user_id": faculty_b["user_id"], "role": "faculty"}
-    args = GenerateQuizArgs(module_id=mod_a["module_id"], co_id=co_a["co_id"], count=2)
+    args = GenerateQuizArgs(module_id=mod_a["module_id"], difficulty="medium", count=2)
     with pytest.raises(AppError) as exc:
         generate_quiz(args, user_b, db)
     assert exc.value.status_code == 404
@@ -425,8 +443,7 @@ def test_generate_quiz_saves_question_with_correct_fields(db, ctx, fake_ai, tagg
     tagged_slide(mod["module_id"], co["co_id"])
 
     user = {"user_id": faculty["user_id"], "role": "faculty"}
-    args = GenerateQuizArgs(module_id=mod["module_id"], co_id=co["co_id"],
-                            difficulty="easy", count=2)
+    args = GenerateQuizArgs(module_id=mod["module_id"], difficulty="easy", count=2)
 
     created_ids = generate_quiz(args, user, db)
     assert len(created_ids) == 2
@@ -434,7 +451,7 @@ def test_generate_quiz_saves_question_with_correct_fields(db, ctx, fake_ai, tagg
     for qid in created_ids:
         row = db.execute(
             text("SELECT stem, options, correct_option, marks, difficulty, "
-                 "bloom_level, status, source, module_id, co_id, created_by "
+                 "bloom_level, status, source, module_id, co_id, created_by, source_slide_number, source_quote "
                  "FROM questions WHERE id = :id"),
             {"id": qid},
         ).mappings().fetchone()
@@ -443,6 +460,8 @@ def test_generate_quiz_saves_question_with_correct_fields(db, ctx, fake_ai, tagg
         assert str(row["module_id"]) == mod["module_id"]
         assert str(row["co_id"]) == co["co_id"]
         assert str(row["created_by"]) == faculty["user_id"]
+        assert row["source_slide_number"] == 1
+        assert row["source_quote"] == _FAKE_QUESTION["source_quote"]
         opts = row["options"]
         assert isinstance(opts, (list, dict)) or hasattr(opts, "__iter__")
 
@@ -466,11 +485,13 @@ def test_generate_quiz_status_always_draft(db, ctx, monkeypatch, tagged_slide):
         def close(self):
             pass
 
-    def fake_with_approved_status(module, co, difficulty, count, client,
+    def fake_with_approved_status(module, course_outcomes, difficulty, count, client,
                                   *, model, usage_recorder=None):
         return [
             {
                 "stem": "Try to approve me",
+                "source_slide_number": 1,
+                "source_quote": "A stack follows Last In First Out (LIFO).",
                 "options": ["A", "B", "C", "D"],
                 "correct_option": 0,
                 "explanation": None,
@@ -479,6 +500,7 @@ def test_generate_quiz_status_always_draft(db, ctx, monkeypatch, tagged_slide):
                 "bloom_level": "remember",
                 "status": "approved",  # AI tries to override
                 "source": "faculty",   # AI tries to override
+                "co_id": None,
             }
             for _ in range(count)
         ]
@@ -488,15 +510,15 @@ def test_generate_quiz_status_always_draft(db, ctx, monkeypatch, tagged_slide):
     monkeypatch.setattr(at, "TokenFactoryClient", FakeClient)
 
     user = {"user_id": faculty["user_id"], "role": "faculty"}
-    args = GenerateQuizArgs(module_id=mod["module_id"], co_id=co["co_id"],
-                            difficulty="medium", count=2)
+    args = GenerateQuizArgs(module_id=mod["module_id"], difficulty="medium", count=2)
     created_ids = generate_quiz(args, user, db)
 
     for qid in created_ids:
         row = db.execute(
-            text("SELECT status, source FROM questions WHERE id = :id"),
+            text("SELECT status, source, co_id FROM questions WHERE id = :id"),
             {"id": qid},
         ).mappings().fetchone()
+        assert row["co_id"] is None
         assert row["status"] == "draft"
         assert row["source"] == "AI"
 
@@ -510,7 +532,7 @@ def test_generate_quiz_quiz_generation_error(db, ctx, fake_ai_failure, tagged_sl
     tagged_slide(mod["module_id"], co["co_id"])
 
     user = {"user_id": faculty["user_id"], "role": "faculty"}
-    args = GenerateQuizArgs(module_id=mod["module_id"], co_id=co["co_id"], count=2)
+    args = GenerateQuizArgs(module_id=mod["module_id"], difficulty="medium", count=2)
     with pytest.raises(AppError) as exc:
         generate_quiz(args, user, db)
     assert exc.value.status_code in (500, 502)
@@ -530,24 +552,26 @@ def test_generate_quiz_missing_env_var(db, ctx, monkeypatch, tagged_slide):
     monkeypatch.delenv("MODEL_GENERATION", raising=False)
 
     user = {"user_id": faculty["user_id"], "role": "faculty"}
-    args = GenerateQuizArgs(module_id=mod["module_id"], co_id=co["co_id"], count=2)
+    args = GenerateQuizArgs(module_id=mod["module_id"], difficulty="medium", count=2)
     with pytest.raises(AppError) as exc:
         generate_quiz(args, user, db)
     assert exc.value.status_code == 500
     assert "not configured" in exc.value.message.lower()
 
 
-def test_generate_quiz_rejects_missing_tagged_content(db, ctx, fake_ai):
-    """AI generation must not proceed without CO-tagged slides."""
+@pytest.mark.parametrize("processing_status, slide", [("done", "  "), ("processing", "Stale slide"), ("failed", "Stale slide")])
+def test_generate_quiz_requires_processed_slide_content(db, ctx, fake_ai, processing_status, slide):
     faculty = ctx.make_faculty()
     subj = ctx.make_subject(faculty["user_id"])
-    co = ctx.make_co(subj["subject_id"], 1, "CO1")
     mod = ctx.make_module(subj["subject_id"], 1, "Module 1")
+    db.execute(text("UPDATE modules SET processing_status = :status WHERE id = :mid"),
+               {"status": processing_status, "mid": mod["module_id"]})
+    db.execute(text("INSERT INTO content_chunks (module_id, slide_number, text) VALUES (:mid, 1, :slide)"),
+               {"mid": mod["module_id"], "slide": slide})
 
     user = {"user_id": faculty["user_id"], "role": "faculty"}
     args = GenerateQuizArgs(
         module_id=mod["module_id"],
-        co_id=co["co_id"],
         difficulty="easy",
         count=1,
     )
@@ -556,7 +580,8 @@ def test_generate_quiz_rejects_missing_tagged_content(db, ctx, fake_ai):
         generate_quiz(args, user, db)
 
     assert exc.value.status_code == 422
-    assert exc.value.code == "NO_TAGGED_CONTENT"
+    assert exc.value.code == "NO_PROCESSED_CONTENT"
+    assert not fake_ai
 
     count = db.execute(
         text("SELECT COUNT(*) FROM questions WHERE module_id = :mid"),

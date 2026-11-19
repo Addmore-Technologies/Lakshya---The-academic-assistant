@@ -21,6 +21,8 @@ QUESTION_BATCH_FIELDS = (
     "marks",
     "difficulty",
     "bloom_level",
+    "source_slide_number",
+    "source_quote",
 )
 
 
@@ -77,10 +79,12 @@ def build_question_batch_payload(drafts: Sequence[Mapping[str, Any]]) -> dict[st
         if draft.get("source") != "AI":
             raise ValueError(f"Question {index} must have source AI")
         required = ("module_id", "co_id", "stem", "options", "correct_option")
-        missing = [key for key in required if key not in draft or draft[key] is None]
+        missing = [key for key in required if key not in draft or (draft[key] is None and key != "co_id")]
         if missing:
             raise ValueError(f"Question {index} is missing required fields: {', '.join(missing)}")
         for key in ("module_id", "co_id", "stem"):
+            if key == "co_id" and draft[key] is None:
+                continue
             if not isinstance(draft[key], str) or not draft[key].strip():
                 raise ValueError(f"Question {index} field {key} must be non-empty text")
         question = {key: draft[key] for key in QUESTION_BATCH_FIELDS if key in draft}
@@ -97,14 +101,14 @@ def build_question_batch_payload(drafts: Sequence[Mapping[str, Any]]) -> dict[st
 
 
 def generate_and_save_quiz_drafts(
-    module: object,
-    co: object,
+    module: Mapping[str, Any],
+    course_outcomes: list[Mapping[str, Any]],
     difficulty: str,
     count: int,
     generator: Callable[..., list[dict[str, Any]]],
     save_batch: Callable[[dict[str, list[dict[str, Any]]]], Any],
 ) -> Any:
     """Generate validated questions, then hand only drafts to the batch endpoint adapter."""
-    drafts = generator(module, co, difficulty, count)
+    drafts = generator(module, course_outcomes, difficulty, count)
     payload = build_question_batch_payload(drafts)
     return save_batch(payload)

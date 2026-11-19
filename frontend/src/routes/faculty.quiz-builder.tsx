@@ -463,7 +463,7 @@ function Page() {
                   <select
                     id={`co-map-${p.id}`}
                     className="h-9 max-w-36 rounded-lg border border-wine/20 bg-background px-2 text-xs"
-                    value={questionEdits[p.id]?.co_id ?? p.co_id}
+                    value={questionEdits[p.id]?.co_id ?? p.co_id ?? ""}
                     disabled={updateQuestionMappingMutation.isPending}
                     onChange={(event) => setQuestionEdits((current) => ({
                       ...current,
@@ -474,6 +474,7 @@ function Page() {
                     }))}
                     aria-label={`Map question ${i + 1} to Course Outcome`}
                   >
+                    <option value="" disabled>Select a Course Outcome</option>
                     {allCOs.map((co) => (
                       <option key={co.id} value={co.id}>CO{co.number}</option>
                     ))}
@@ -490,7 +491,7 @@ function Page() {
                     onChange={(event) => setQuestionEdits((current) => ({
                       ...current,
                       [p.id]: {
-                        co_id: current[p.id]?.co_id ?? p.co_id,
+                        co_id: current[p.id]?.co_id ?? p.co_id ?? "",
                         marks: event.target.value,
                       },
                     }))}
