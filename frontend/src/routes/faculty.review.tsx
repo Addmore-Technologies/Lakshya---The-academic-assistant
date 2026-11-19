@@ -7,7 +7,7 @@ import { Toaster } from "@/components/ui/sonner";
 import { Shell } from "@/components/lk/Shell";
 import { Btn, Card, Chip, CO, Field, inputCls, PageHead, type Status } from "@/components/lk/ui";
 import { cn } from "@/lib/utils";
-import { agent, ApiError, questions, subjects } from "@/lib/api";
+import { ApiError, modules, questions, subjects } from "@/lib/api";
 import { getStoredSubjectId, storeSubjectId } from "@/lib/subject-context";
 import type { Question, SubjectDetail } from "@/lib/api";
 
@@ -33,7 +33,6 @@ function Page() {
   const [sourceFilter, setSourceFilter] = useState<"All" | "AI" | "Faculty">("All");
   const [coFilter, setCoFilter] = useState<number | null>(null);
   const [genModule, setGenModule] = useState<string>("");
-  const [genCO, setGenCO] = useState<string>("");
   const [genCount, setGenCount] = useState("5");
   const [genDifficulty, setGenDifficulty] = useState<"easy" | "medium" | "hard">("medium");
   const [moduleFilter, setModuleFilter] = useState<string>("All");
@@ -79,36 +78,16 @@ function Page() {
     enabled: !!activeSubject && availableModules.length > 0,
   });
 
+  const generationCount = Number(genCount);
+  const validCount = Number.isInteger(generationCount) && generationCount >= 1 && generationCount <= 20;
+  const validModule = availableModules.some((module) => module.id === genModule);
   const generateMutation = useMutation({
-    mutationFn: async () => {
-      const count = Number(genCount);
-      if (!genModule || !genCO) throw new Error("Select a module and Course Outcome.");
-      if (!Number.isInteger(count) || count < 1 || count > 20) {
-        throw new Error("Choose between 1 and 20 questions.");
-      }
-      const module = availableModules.find((item) => item.id === genModule);
-      const co = allCOs.find((item) => item.id === genCO);
-      if (!module || !co) throw new Error("The selected module or Course Outcome is no longer available.");
-      const message = [
-        "Use the generate_quiz tool exactly once with these exact arguments.",
-        `module_id: ${genModule}`,
-        `co_id: ${genCO}`,
-        `difficulty: ${genDifficulty}`,
-        `count: ${count}`,
-        "Do not ask follow-up questions. Do not invent IDs. After the tool completes, briefly report the result.",
-      ].join("\n");
-      const result = await agent.chat(message);
-      const generated = result.tool_calls.some(
-        (call) => call.name === "generate_quiz" && call.status === "draft_review",
-      );
-      if (!generated) {
-        throw new Error(result.reply || "The AI agent did not generate question drafts. Check that AI services are configured.");
-      }
-      return result;
-    },
+    mutationFn: () => modules.generateQuestionDrafts(genModule, { difficulty: genDifficulty, count: generationCount }),
+    retry: false,
     onSuccess: async (result) => {
       await queryClient.invalidateQueries({ queryKey: ["review-questions", activeSubject] });
-      toast.success("AI question drafts generated. Review and approve them before adding them to a quiz.");
+      const count = result.question_ids.length;
+      toast.success(`${count} question ${count === 1 ? "draft" : "drafts"} generated. Review before adding to a quiz.`);
     },
     onError: (error) => {
       toast.error(error instanceof Error ? error.message : "Could not generate AI question drafts.");
@@ -153,8 +132,8 @@ function Page() {
         marks: Number(editMarks),
         co_id: editCOId,
       }),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["review-questions", activeSubject] });
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["review-questions", activeSubject] });
       setEditingId(null);
       toast.success("Question updated");
     },
@@ -171,13 +150,10 @@ function Page() {
     setEditCorrect(q.correct_option);
     setEditExplanation(q.explanation ?? "");
     setEditMarks(String(q.marks ?? 1));
-    setEditCOId(q.co_id);
+    setEditCOId(q.co_id ?? "");
   };
 
-  const set = (id: string, s: Status) => {
-    if (s === "Approved") approveMutation.mutate(id);
-    else if (s === "Rejected") rejectMutation.mutate(id);
-  };
+  const hasMapping = (q: Question) => q.co_id !== null && q.co_number !== null;
 
   const displayStatus = (status: string): Status =>
     (status.charAt(0).toUpperCase() + status.slice(1).toLowerCase()) as Status;
@@ -196,6 +172,8 @@ function Page() {
       (q.difficulty ?? "").toLowerCase() === difficultyFilter.toLowerCase();
     return matchesStatus && matchesSource && matchesCO && matchesModule && matchesDifficulty;
   });
+  const canApprove = (q: Question) => q.id !== editingId && hasMapping(q);
+  const approvableDrafts = visible.filter((q) => canApprove(q) && displayStatus(q.status) === "Draft");
 
   const count = (s: Status) =>
     (allQuestions ?? []).filter((q) => displayStatus(q.status) === s).length;
@@ -216,19 +194,14 @@ function Page() {
         title="Question review"
         right={
           <Btn
-            disabled={
-              approveMutation.isPending || !visible.some((q) => displayStatus(q.status) === "Draft")
-            }
+            disabled={approveMutation.isPending || approvableDrafts.length === 0}
             onClick={async () => {
-              const draftIds = visible
-                .filter((q) => displayStatus(q.status) === "Draft")
-                .map((q) => q.id);
               try {
-                await Promise.all(draftIds.map((id) => questions.approve(id)));
+                await Promise.all(approvableDrafts.map((q) => questions.approve(q.id)));
                 await queryClient.invalidateQueries({
                   queryKey: ["review-questions", activeSubject],
                 });
-                toast.success(`Approved ${draftIds.length} questions`);
+                toast.success(`Approved ${approvableDrafts.length} questions`);
               } catch (error) {
                 if (error instanceof ApiError) toast.error(error.message);
                 else toast.error("Some questions could not be approved. Refresh and retry.");
@@ -237,29 +210,21 @@ function Page() {
             }}
           >
             <Check className="size-4" />
-            Approve all visible
+            Approve all visible mapped drafts
           </Btn>
         }
       />
       <Card className="mb-5" title="Generate AI question drafts">
         <div className="space-y-3">
           <p className="text-sm text-muted-foreground">
-            Generate draft questions from processed slide content tagged to one approved Course Outcome. Generated questions are never published automatically; review, edit and approve them below.
+            Generate drafts from the selected module’s processed slides. Review each question and its Course Outcome mapping before approval.
           </p>
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
             <Field label="Module">
               <select className={inputCls} value={genModule} onChange={(e) => setGenModule(e.target.value)}>
                 <option value="">Select module</option>
                 {availableModules.map((module) => (
                   <option key={module.id} value={module.id}>M{module.number} · {module.title}</option>
-                ))}
-              </select>
-            </Field>
-            <Field label="Course Outcome">
-              <select className={inputCls} value={genCO} onChange={(e) => setGenCO(e.target.value)}>
-                <option value="">Select approved CO</option>
-                {allCOs.map((co) => (
-                  <option key={co.id} value={co.id}>CO{co.number} · {co.description}</option>
                 ))}
               </select>
             </Field>
@@ -276,11 +241,11 @@ function Page() {
           </div>
           <div className="flex flex-wrap items-center justify-between gap-3">
             <p className="text-xs text-muted-foreground">
-              Requires a processed PPTX with slides tagged to the selected CO. If no tagged slides exist, the backend will explain why generation cannot proceed.
+              Drafts are not published automatically. Use Edit to assign a Course Outcome to any unmapped question.
             </p>
             <Btn
               onClick={() => generateMutation.mutate()}
-              disabled={generateMutation.isPending || !genModule || !genCO || !allCOs.length}
+              disabled={generateMutation.isPending || !validModule || !validCount}
             >
               <Sparkle className="size-4" />
               {generateMutation.isPending ? "Generating drafts…" : "Generate question drafts"}
@@ -395,7 +360,7 @@ function Page() {
                     <span className="font-mono text-[11px] text-muted-foreground">
                       Q{q.id.substring(0, 8)} · M{mod?.number ?? "?"}
                     </span>
-                    <CO n={q.co_number} />
+                    <CO n={hasMapping(q) ? q.co_number : null} />
                     <span
                       className={cn(
                         "rounded-full px-2 py-0.5 text-[11px]",
@@ -468,6 +433,7 @@ function Page() {
                             value={editCOId}
                             onChange={(e) => setEditCOId(e.target.value)}
                           >
+                            <option value="" disabled>Select a Course Outcome</option>
                             {allCOs.map((co) => (
                               <option key={co.id} value={co.id}>CO{co.number} · {co.description}</option>
                             ))}
@@ -506,7 +472,7 @@ function Page() {
                         />
                       </Field>
                       <div className="flex justify-end gap-2">
-                        <Btn variant="ghost" size="sm" onClick={() => setEditingId(null)}>
+                        <Btn variant="ghost" size="sm" disabled={updateMutation.isPending} onClick={() => setEditingId(null)}>
                           Cancel
                         </Btn>
                         <Btn
@@ -537,6 +503,7 @@ function Page() {
                       variant="ghost"
                       size="sm"
                       onClick={() => (editingId === q.id ? setEditingId(null) : startEditing(q))}
+                      disabled={updateMutation.isPending}
                     >
                       <Pencil className="size-3.5" />
                       {editingId === q.id ? "Close editor" : "Edit"}
@@ -544,7 +511,7 @@ function Page() {
                     <Btn
                       variant="secondary"
                       size="sm"
-                      onClick={() => set(q.id, "Rejected")}
+                      onClick={() => rejectMutation.mutate(q.id)}
                       disabled={displayStatus(q.status) === "Rejected"}
                     >
                       <X className="size-3.5" />
@@ -552,8 +519,9 @@ function Page() {
                     </Btn>
                     <Btn
                       size="sm"
-                      onClick={() => set(q.id, "Approved")}
-                      disabled={displayStatus(q.status) === "Approved"}
+                      onClick={() => approveMutation.mutate(q.id)}
+                      disabled={!canApprove(q) || displayStatus(q.status) === "Approved"}
+                      title={!hasMapping(q) ? "Edit this question to assign a Course Outcome before approval." : undefined}
                     >
                       <Check className="size-3.5" />
                       Approve

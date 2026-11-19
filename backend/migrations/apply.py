@@ -32,7 +32,7 @@ def apply_migrations():
 
     for filename in migration_files:
         filepath = os.path.join(_dir, filename)
-        with open(filepath, "r", encoding="utf-8") as f:
+        with open(filepath, "r", encoding="utf-8-sig") as f:
             sql = f.read()
 
         with engine.begin() as conn:

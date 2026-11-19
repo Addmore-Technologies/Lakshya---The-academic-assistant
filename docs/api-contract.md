@@ -124,7 +124,8 @@ Faculty only. Status values: `draft`, `approved`, `rejected`. Source: `AI` or `f
 |---|---|---|---|
 | `GET /questions?module_id=&co_id=&status=&source=` | query (`module_id` required) | `[question]` | live |
 | `POST /questions` | manual question: `{module_id, co_id, stem, options: [4 strings], correct_option: 0-3, explanation?, marks?, difficulty?, bloom_level?}` | `201 question` (source `faculty`, status `draft`) | live |
-| `POST /questions/batch` | `{"questions": [{...same fields..., "source": "AI"}]}` for the `generate_quiz` tool; every item is saved as `draft` | `201 [question]` | live |
+| `POST /modules/{module_id}/question-drafts` | `{difficulty, count, confirmation_token?}` | `{question_ids}` after the full batch passes validation. For a suspected unrelated PPTX: `409 MODULE_CONTENT_MISMATCH` with `error.details.slide_preview` and `error.details.confirmation_token`. | faculty review form |
+| `POST /questions/batch` | `{"questions": [...]}`; same question fields as manual creation, but `co_id` may be omitted or `null`. The server sets source `AI` and status `draft` for every item. | `201 [question]` | live |
 | `PATCH /questions/{id}` | any editable field | `question` | live |
 | `POST /questions/{id}/approve` | none | `question` (status `approved`) | live |
 | `POST /questions/{id}/reject` | none | `question` (status `rejected`) | live |
@@ -133,7 +134,13 @@ Faculty only. Status values: `draft`, `approved`, `rejected`. Source: `AI` or `f
 question: {"id","module_id","co_id","co_number","stem","options":["A","B","C","D"],"correct_option":1,"explanation","marks","difficulty","bloom_level","status","source","created_by"}
 ```
 
+- New generated drafts expose `source_slide_number` and `source_quote` via the faculty question API. These are snapshots from generation, not evidence of later faculty edits. Legacy questions remain readable with null evidence. If a batch import supplies a citation, both fields must match an actual supporting slide in its module or the batch fails.
+- A mismatch warning does not generate questions. Review the preview before sending the token back with unchanged inputs; use the normal upload process to replace a wrong deck. Confirmation permits using that deck, not relaxing evidence, CO, or approval checks. The chat model cannot issue confirmation.
 - Exactly 4 options and `correct_option` between 0 and 3, enforced by the database.
+- A question already used in a published or attempted quiz keeps its module and CO. Reassignment returns `409 CONFLICT` so review cannot change historical reports.
+- An unmapped question has JSON `null` for both `co_id` and `co_number`. It appears in its module's list (unless excluded by a filter) and can be edited or rejected before a CO is chosen.
+- Assign a CO with `PATCH /questions/{id}` and `{"co_id":"<uuid>"}`. A patch may change the module or CO only within the question's original subject; a different subject or unowned module returns `404 NOT_FOUND`.
+- Approval (including `PATCH` with `status: "approved"`) requires a CO from that subject. An unmapped approval, or clearing `co_id` while leaving the question approved, returns `409 CONFLICT` without changing the question. A single patch may assign a valid CO and approve together.
 - Faculty-written questions are created as `draft` and approved the same way as AI ones. A question cannot be un-approved while it is in a published quiz (`409 CONFLICT`).
 
 ## 6. Upload pipeline [Arya]
@@ -239,7 +246,7 @@ Implemented as backend functions, called by the agent loop with the session user
 | `get_my_progress(subject_id)` | student | Identity is injected from the session; no USN parameter | contract published; handler pending |
 | `get_student_progress(subject_id, usn?)` | faculty | Faculty ownership and subject access must be enforced | contract published; handler pending |
 | `export_sheet(subject_id, scope?, module_id?, section?)` | faculty | Wraps the export endpoint, returns a download link | contract published; handler pending |
-| `generate_quiz(module_id, co_id, difficulty, count)` | faculty | Calls Danwin's generation function and stores review-only drafts through `POST /questions/batch` | contract published; handler pending |
+| `generate_quiz(module_id, difficulty, count)` | faculty | Uses the selected module’s processed slides and all of its subject’s CO definitions. Saves 1–20 AI drafts in the question bank; uncertain COs remain null until faculty review. | implemented |
 
 Every tool validates its arguments against the JSON schemas in `ai/schemas/` before running.
 

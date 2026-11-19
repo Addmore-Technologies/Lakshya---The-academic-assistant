@@ -352,13 +352,19 @@ export interface CreateModuleBody {
   title: string;
 }
 
+export interface GenerateQuestionDraftsBody {
+  difficulty: "easy" | "medium" | "hard";
+  count: number;
+  confirmation_token?: string;
+}
+
 // ── Questions ──
 
 export interface Question {
   id: string;
   module_id: string;
-  co_id: string;
-  co_number: number;
+  co_id: string | null;
+  co_number: number | null;
   stem: string;
   options: string[];
   correct_option: number;
@@ -382,6 +388,9 @@ export interface CreateQuestionBody {
   difficulty?: string;
   bloom_level?: string;
 }
+
+// AI drafts may be unmapped; manual question creation still requires a CO.
+type DraftQuestionBody = Omit<CreateQuestionBody, "co_id"> & { co_id?: string | null };
 
 // ── Quizzes ──
 
@@ -847,27 +856,158 @@ function assignmentPath(id: string): string {
   return `${assignmentCollection}/${encodeURIComponent(id)}`;
 }
 
+
+
+export interface BulkStudentRow {
+  row: number;
+  usn: string;
+  name: string;
+}
+
+export interface BulkStudentSkip {
+  row: number;
+  usn: string;
+  reason: string;
+}
+
+export interface BulkStudentPreview {
+  total_rows: number;
+  ready_count: number;
+  skipped_count: number;
+  ready: BulkStudentRow[];
+  skipped: BulkStudentSkip[];
+}
+
+export interface BulkStudentResult {
+  total_rows: number;
+  created_students: number;
+  enrolled_students: number;
+  skipped_count: number;
+  skipped: BulkStudentSkip[];
+  credentials: Array<{ usn: string; pin: string }>;
+}
+
 export const teachingAssignments = {
-  list() {
+
+  bulkPreview(id: string, file: File): Promise<BulkStudentPreview> {
+    const formData = new FormData();
+    formData.append("file", file);
+    return apiRequest<BulkStudentPreview>(
+      `${assignmentPath(id)}/students/bulk-preview`,
+      { method: "POST", body: formData }
+    );
+  },
+
+  bulkUpload(id: string, file: File): Promise<BulkStudentResult> {
+    const formData = new FormData();
+    formData.append("file", file);
+    return apiRequest<BulkStudentResult>(
+      `${assignmentPath(id)}/students/bulk-upload`,
+      { method: "POST", body: formData }
+    );
+  },
+
+
+  // Get all teaching assignments
+  list(): Promise<TeachingAssignment[]> {
     return apiRequest<TeachingAssignment[]>(assignmentCollection);
   },
 
-  attainment(id: string) {
-    return apiRequest<TeachingAssignmentAttainment>(`${assignmentPath(id)}/attainment`);
+  // Create a new class / section
+  create(
+    subjectId: string,
+    section: string
+  ): Promise<TeachingAssignment> {
+    return apiRequest<TeachingAssignment>(assignmentCollection, {
+      method: "POST",
+      body: {
+        subject_id: subjectId,
+        section: section.trim().toUpperCase(),
+      },
+    });
   },
 
-  attempts(id: string) {
-    return apiRequest<AttemptHistoryItem[]>(`${assignmentPath(id)}/attempts`);
+  // Update an existing class / section
+  update(
+    id: string,
+    section: string
+  ): Promise<TeachingAssignment> {
+    return apiRequest<TeachingAssignment>(assignmentPath(id), {
+      method: "PATCH",
+      body: {
+        section: section.trim().toUpperCase(),
+      },
+    });
   },
 
-  roster(id: string) {
-    return apiRequest<TeachingAssignmentRoster>(`${assignmentPath(id)}/roster`);
+  // Archive a teaching assignment
+  archive(
+    id: string
+  ): Promise<{
+    id: string;
+    active: boolean;
+    status: "archived";
+  }> {
+    return apiRequest<{
+      id: string;
+      active: boolean;
+      status: "archived";
+    }>(assignmentPath(id), {
+      method: "DELETE",
+    });
+  },
+
+  // Enroll a student using their USN
+  enrollStudent(
+    id: string,
+    usn: string
+  ): Promise<unknown> {
+    return apiRequest<unknown>(`${assignmentPath(id)}/students`, {
+      method: "POST",
+      body: {
+        usn: usn.trim().toUpperCase(),
+      },
+    });
+  },
+
+  // Get CO attainment for a class
+  attainment(
+    id: string
+  ): Promise<TeachingAssignmentAttainment> {
+    return apiRequest<TeachingAssignmentAttainment>(
+      `${assignmentPath(id)}/attainment`
+    );
+  },
+
+  // Get quiz attempt history
+  attempts(
+    id: string
+  ): Promise<AttemptHistoryItem[]> {
+    return apiRequest<AttemptHistoryItem[]>(
+      `${assignmentPath(id)}/attempts`
+    );
+  },
+
+  // Get student roster
+  roster(
+    id: string
+  ): Promise<TeachingAssignmentRoster> {
+    return apiRequest<TeachingAssignmentRoster>(
+      `${assignmentPath(id)}/roster`
+    );
   },
 };
 
 // ── Modules ─────────────────────────────────────────────────────────────
 
 export const modules = {
+  generateQuestionDrafts(moduleId: string, body: GenerateQuestionDraftsBody) {
+    return apiRequest<{ question_ids: string[] }>(`/modules/${encodeURIComponent(moduleId)}/question-drafts`, {
+      method: "POST",
+      body,
+    });
+  },
+
   create(subjectId: string, body: CreateModuleBody): Promise<ModuleSummary> {
     return apiRequest<ModuleSummary>(`/subjects/${encodeURIComponent(subjectId)}/modules`, {
       method: "POST",
@@ -919,7 +1059,7 @@ export const questions = {
     return apiRequest<Question>("/questions", { method: "POST", body });
   },
 
-  batchCreate(bodies: CreateQuestionBody[]): Promise<Question[]> {
+  batchCreate(bodies: DraftQuestionBody[]): Promise<Question[]> {
     return apiRequest<Question[]>("/questions/batch", {
       method: "POST",
       body: { questions: bodies },
@@ -928,7 +1068,7 @@ export const questions = {
 
   update(
     id: string,
-    body: Partial<CreateQuestionBody & { status?: string; source?: string }>,
+    body: Partial<DraftQuestionBody & { status: string; source: string }>,
   ): Promise<Question> {
     return apiRequest<Question>(`/questions/${encodeURIComponent(id)}`, {
       method: "PATCH",

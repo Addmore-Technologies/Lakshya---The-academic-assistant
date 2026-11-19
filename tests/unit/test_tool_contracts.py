@@ -29,6 +29,16 @@ def test_registry_exposes_only_bound_tools_for_authenticated_role():
     assert "find_weak_COs" not in faculty_names  # no handler, never advertise a stub
 
 
+def test_quiz_tool_accepts_module_without_preselected_co():
+    spec = next(s for s in load_tool_manifest() if s["name"] == "generate_quiz")
+    args = {"module_id": "module-1", "difficulty": "medium", "count": 20}
+    validate_json_schema(args, spec["parameters"])
+    with pytest.raises(ToolValidationError):
+        validate_json_schema({**args, "count": 21}, spec["parameters"])
+    with pytest.raises(ToolValidationError):
+        validate_json_schema({**args, "co_id": "forced-co"}, spec["parameters"])
+
+
 def test_registry_can_be_strict_when_server_adapters_are_expected():
     with pytest.raises(ToolManifestError, match="Handlers are not configured"):
         build_tool_registry({}, strict=True)

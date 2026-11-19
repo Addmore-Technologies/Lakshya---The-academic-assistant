@@ -40,7 +40,7 @@ def test_agent_runtime_installs_only_registered_faculty_tools(monkeypatch):
 
     tool = handler.loop.tools.get("generate_quiz")
     result = tool.handler(
-        {"module_id": "module-1", "co_id": "co-1", "difficulty": "easy", "count": 2},
+        {"module_id": "module-1", "difficulty": "easy", "count": 2},
         {"user_id": "faculty-1", "role": "faculty"},
     )
     assert result == {"drafts": [{"question_ids": ["q-1", "q-2"], "question_count": 2}]}

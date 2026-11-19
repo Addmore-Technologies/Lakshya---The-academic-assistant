@@ -1,7 +1,8 @@
 import json
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, Body, Path, Query
-from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
 from sqlalchemy import text
 
 from ..db import get_conn
@@ -9,6 +10,33 @@ from ..deps import require_faculty
 from ..errors import AppError
 
 router = APIRouter(tags=["questions"])
+
+
+class BatchQuestion(BaseModel):
+    module_id: UUID
+    co_id: UUID | None = None
+    stem: str
+    options: list[str]
+    correct_option: int
+    explanation: str | None = None
+    marks: float = 1
+    difficulty: str | None = None
+    bloom_level: str | None = None
+    source_slide_number: int | None = Field(default=None, gt=0, strict=True)
+    source_quote: str | None = None
+
+
+class QuestionBatch(BaseModel):
+    questions: list[BatchQuestion]
+
+
+class QuestionResponse(BatchQuestion):
+    id: UUID
+    co_id: UUID | None
+    co_number: int | None
+    status: str
+    source: str
+    created_by: UUID | None
 
 
 # ---------------------------------------------------------------------------
@@ -19,7 +47,7 @@ def _row_to_question(row) -> dict:
     return {
         "id": str(row["id"]),
         "module_id": str(row["module_id"]),
-        "co_id": str(row["co_id"]),
+        "co_id": str(row["co_id"]) if row["co_id"] is not None else None,
         "co_number": row["co_number"],
         "stem": row["stem"],
         "options": list(row["options"]),
@@ -28,34 +56,28 @@ def _row_to_question(row) -> dict:
         "marks": float(row["marks"]) if row["marks"] else None,
         "difficulty": row["difficulty"],
         "bloom_level": row["bloom_level"],
+        "source_slide_number": row["source_slide_number"],
+        "source_quote": row["source_quote"],
         "status": row["status"],
         "source": row["source"],
         "created_by": str(row["created_by"]) if row["created_by"] else None,
     }
 
 
-def _validate_module_and_co(conn, module_id: str, co_id: str, faculty_user_id: str):
-    """Verify the module and CO exist, belong to the same subject, and the
-    faculty owns that subject. Raises 404 on any failure."""
+def _validate_module_and_co(conn, module_id, co_id, faculty_user_id, *, original_subject=None):
+    """Check module ownership and, when supplied, CO subject membership."""
     stmt = text(
         "SELECT m.subject_id AS subject_id "
-        "FROM modules m WHERE m.id = :mid"
+        "FROM modules m JOIN subjects s ON s.id = m.subject_id "
+        "WHERE m.id = :mid AND s.faculty_user_id = :fid"
     )
-    mod = conn.execute(stmt, {"mid": str(module_id)}).mappings().fetchone()
-    if mod is None:
-        raise AppError(404, "NOT_FOUND", "Module not found")
-
-    # Check faculty owns the subject
-    owner = conn.execute(
-        text(
-            "SELECT 1 FROM subjects s WHERE s.id = :sid AND s.faculty_user_id = :fid"
-        ),
-        {"sid": str(mod["subject_id"]), "fid": faculty_user_id},
-    ).mappings().fetchone()
-    if owner is None:
+    mod = conn.execute(stmt, {"mid": module_id, "fid": faculty_user_id}).mappings().fetchone()
+    if mod is None or (original_subject is not None and mod["subject_id"] != original_subject):
         raise AppError(404, "NOT_FOUND", "Module not found")
 
     # Check CO belongs to the same subject
+    if co_id is None:
+        return
     co = conn.execute(
         text(
             "SELECT id, number FROM course_outcomes "
@@ -73,11 +95,11 @@ def _question_owned(conn, question_id: str, faculty_user_id: str):
     subject it belongs to, else raise 404."""
     row = conn.execute(
         text(
-            "SELECT q.*, co.number AS co_number FROM questions q "
+            "SELECT q.*, m.subject_id, co.number AS co_number FROM questions q "
             "JOIN modules m ON m.id = q.module_id "
             "JOIN subjects s ON s.id = m.subject_id "
             "LEFT JOIN course_outcomes co ON co.id = q.co_id "
-            "WHERE q.id = :qid AND s.faculty_user_id = :fid"
+            "WHERE q.id = :qid AND s.faculty_user_id = :fid FOR UPDATE OF q"
         ),
         {"qid": str(question_id), "fid": faculty_user_id},
     ).mappings().fetchone()
@@ -90,7 +112,7 @@ def _question_owned(conn, question_id: str, faculty_user_id: str):
 # Endpoints
 # ---------------------------------------------------------------------------
 
-@router.get("/questions")
+@router.get("/questions", response_model=list[QuestionResponse])
 def list_questions(
     conn=Depends(get_conn),
     faculty=Depends(require_faculty),
@@ -134,7 +156,7 @@ def list_questions(
     return [_row_to_question(r) for r in rows]
 
 
-@router.post("/questions")
+@router.post("/questions", status_code=201, response_model=QuestionResponse)
 def create_question(
     conn=Depends(get_conn),
     faculty=Depends(require_faculty),
@@ -189,47 +211,51 @@ def create_question(
         ),
         {"id": str(row["id"])},
     ).mappings().fetchone()
-    return JSONResponse(content=_row_to_question(full), status_code=201)
+    return _row_to_question(full)
 
 
-@router.post("/questions/batch")
+@router.post("/questions/batch", status_code=201, response_model=list[QuestionResponse])
 def create_questions_batch(
+    payload: QuestionBatch,
     conn=Depends(get_conn),
     faculty=Depends(require_faculty),
-    payload: dict = Body(...),
 ):
-    questions = payload.get("questions")
-    if not isinstance(questions, list) or len(questions) == 0:
+    if not payload.questions:
         raise AppError(400, "BAD_REQUEST", "Expected a non-empty 'questions' array")
 
     created = []
-    for q in questions:
-        module_id = q.get("module_id")
-        co_id = q.get("co_id")
-        if module_id is None or co_id is None:
-            raise AppError(400, "BAD_REQUEST", "Each question needs module_id and co_id")
-        _validate_module_and_co(conn, module_id, co_id, faculty["user_id"])
+    for index, q in enumerate(payload.questions, start=1):
+        _validate_module_and_co(conn, q.module_id, q.co_id, faculty["user_id"])
+
+        # Older batch clients have no citations. If a client supplies evidence,
+        # validate it against the selected module, not against client-provided slides.
+        if q.source_slide_number is not None or q.source_quote is not None:
+            from ai.quiz_generation import QuizGenerationError, validate_slide_evidence
+
+            slide = conn.execute(text(
+                "SELECT text FROM content_chunks WHERE module_id = :mid AND slide_number = :slide"
+            ), {"mid": q.module_id, "slide": q.source_slide_number}).scalar_one_or_none()
+            if slide is None or not 0 <= q.correct_option < len(q.options):
+                raise AppError(422, "INVALID_EVIDENCE", "Invalid source slide or correct option")
+            try:
+                validate_slide_evidence(q.model_dump(), index, {q.source_slide_number: ' '.join(slide.split())},
+                                        q.stem, q.options[q.correct_option])
+            except QuizGenerationError as exc:
+                raise AppError(422, "INVALID_EVIDENCE", str(exc)) from exc
 
         result = conn.execute(
             text(
                 "INSERT INTO questions "
                 "(module_id, co_id, stem, options, correct_option, explanation, "
-                "marks, difficulty, bloom_level, source, created_by) "
+                "marks, difficulty, bloom_level, source, created_by, source_slide_number, source_quote) "
                 "VALUES "
                 "(:module_id, :co_id, :stem, CAST(:opts AS jsonb), :correct_option, :explanation, "
-                ":marks, :difficulty, :bloom_level, 'AI', :created_by) "
+                ":marks, :difficulty, :bloom_level, 'AI', :created_by, :source_slide_number, :source_quote) "
                 "RETURNING id"
             ),
             {
-                "module_id": str(module_id),
-                "co_id": str(co_id),
-                "stem": q.get("stem"),
-                "opts": json.dumps(q.get("options")),
-                "correct_option": q.get("correct_option"),
-                "explanation": q.get("explanation"),
-                "marks": q.get("marks", 1),
-                "difficulty": q.get("difficulty"),
-                "bloom_level": q.get("bloom_level"),
+                **q.model_dump(exclude={"options"}),
+                "opts": json.dumps(q.options),
                 "created_by": faculty["user_id"],
             },
         )
@@ -245,17 +271,21 @@ def create_questions_batch(
             "WHERE q.id IN (" + placeholders + ") ORDER BY q.created_at"
         ),
     ).mappings().fetchall()
-    return JSONResponse(content=[_row_to_question(r) for r in rows], status_code=201)
+    return [_row_to_question(r) for r in rows]
 
 
-@router.patch("/questions/{id}")
+@router.patch("/questions/{id}", response_model=QuestionResponse)
 def update_question(
     id: str = Path(..., alias="id"),
     conn=Depends(get_conn),
     faculty=Depends(require_faculty),
     payload: dict = Body(...),
 ):
-    row = _question_owned(conn, id, faculty["user_id"])
+    return _update_question(conn, id, faculty["user_id"], payload)
+
+
+def _update_question(conn, id, faculty_id, payload):
+    row = _question_owned(conn, id, faculty_id)
 
     updatable = {"stem", "options", "correct_option", "explanation",
                  "marks", "difficulty", "bloom_level", "co_id", "module_id",
@@ -265,14 +295,27 @@ def update_question(
     if not updates:
         return _row_to_question(row)
 
-    # If co_id is being updated, validate it belongs to the module's subject
-    if "co_id" in updates:
-        qrow = conn.execute(
-            text("SELECT module_id FROM questions WHERE id = :id"),
-            {"id": id},
-        ).mappings().fetchone()
-        _validate_module_and_co(conn, str(qrow["module_id"]), str(updates["co_id"]),
-                                faculty["user_id"])
+    co_id = updates.get("co_id", row["co_id"])
+    if updates.get("status", row["status"]) == "approved" and co_id is None:
+        raise AppError(409, "CONFLICT", "Assign a course outcome before approving the question")
+
+    if "co_id" in updates or "module_id" in updates or updates.get("status") == "approved":
+        _validate_module_and_co(conn, updates.get("module_id", row["module_id"]), co_id,
+                                faculty_id, original_subject=row["subject_id"])
+
+    # Historical quiz reports resolve a question's mapping from its current row.
+    if any(k in updates and str(updates[k]) != str(row[k]) for k in ("co_id", "module_id")):
+        used = conn.execute(text(
+            "SELECT 1 FROM quiz_questions qq JOIN quizzes z ON z.id = qq.quiz_id "
+            "WHERE qq.question_id = :id AND (z.published OR z.published_at IS NOT NULL "
+            "OR EXISTS (SELECT 1 FROM quiz_attempts a WHERE a.quiz_id = z.id)) LIMIT 1"
+        ), {"id": id}).scalar()
+        if used:
+            raise AppError(409, "CONFLICT", "Cannot remap a question used in quiz history")
+
+    if "module_id" in updates and str(updates["module_id"]) != str(row["module_id"]):
+        # A slide number only has meaning within its source module.
+        updates.update(source_slide_number=None, source_quote=None)
 
     # Build SET clause, handling jsonb columns
     set_parts = []
@@ -286,7 +329,7 @@ def update_question(
             params[k] = v
     set_clause = ", ".join(set_parts)
     params["id"] = id
-    params["fid"] = faculty["user_id"]
+    params["fid"] = faculty_id
 
     result = conn.execute(
         text(
@@ -314,46 +357,19 @@ def update_question(
     return _row_to_question(full)
 
 
-@router.post("/questions/{id}/approve")
+@router.post("/questions/{id}/approve", response_model=QuestionResponse)
 def approve_question(
     id: str = Path(..., alias="id"),
     conn=Depends(get_conn),
     faculty=Depends(require_faculty),
 ):
-    row = _question_owned(conn, id, faculty["user_id"])
-    result = conn.execute(
-        text("UPDATE questions SET status = 'approved' WHERE id = :id RETURNING *"),
-        {"id": id},
-    )
-    updated = result.mappings().fetchone()
-    full = conn.execute(
-        text(
-            "SELECT q.*, co.number AS co_number FROM questions q "
-            "LEFT JOIN course_outcomes co ON co.id = q.co_id "
-            "WHERE q.id = :id"
-        ),
-        {"id": id},
-    ).mappings().fetchone()
-    return _row_to_question(full)
+    return _update_question(conn, id, faculty["user_id"], {"status": "approved"})
 
 
-@router.post("/questions/{id}/reject")
+@router.post("/questions/{id}/reject", response_model=QuestionResponse)
 def reject_question(
     id: str = Path(..., alias="id"),
     conn=Depends(get_conn),
     faculty=Depends(require_faculty),
 ):
-    row = _question_owned(conn, id, faculty["user_id"])
-    conn.execute(
-        text("UPDATE questions SET status = 'rejected' WHERE id = :id"),
-        {"id": id},
-    )
-    full = conn.execute(
-        text(
-            "SELECT q.*, co.number AS co_number FROM questions q "
-            "LEFT JOIN course_outcomes co ON co.id = q.co_id "
-            "WHERE q.id = :id"
-        ),
-        {"id": id},
-    ).mappings().fetchone()
-    return _row_to_question(full)
+    return _update_question(conn, id, faculty["user_id"], {"status": "rejected"})

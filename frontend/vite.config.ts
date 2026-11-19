@@ -39,6 +39,10 @@ export default defineConfig({
           changeOrigin: true,
         },
 
+        "/modules": {
+          target: "http://127.0.0.1:8000",
+          changeOrigin: true,
+        },
         "/subjects": {
           target: "http://127.0.0.1:8000",
           changeOrigin: true,

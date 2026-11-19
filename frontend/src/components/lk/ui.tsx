@@ -37,16 +37,16 @@ const CO_STYLE = [
   "bg-taupe text-ivory",
   "bg-ivory text-oxblood border border-dusty",
 ];
-export function CO({ n, className }: { n: number; className?: string }) {
+export function CO({ n, className }: { n: number | null; className?: string }) {
   return (
     <span
       className={cn(
         "inline-flex h-6 items-center rounded-full px-2.5 font-mono text-[11px] font-medium",
-        CO_STYLE[(n - 1) % 6],
+        n === null ? "bg-beige text-wine" : CO_STYLE[(n - 1) % 6],
         className,
       )}
     >
-      CO{n}
+      {n === null ? "Unmapped CO" : `CO${n}`}
     </span>
   );
 }

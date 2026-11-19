@@ -77,18 +77,17 @@
     },
     {
       "name": "generate_quiz",
-      "description": "Generate AI question drafts for faculty review. This tool never approves or publishes questions.",
+      "description": "Generate drafts from the module's slides, mapping each to a supported subject outcome or leaving it unmapped for faculty review. Never approves or publishes questions.",
       "roles": ["faculty"],
       "mutation": "draft_review",
       "parameters": {
         "type": "object",
         "properties": {
           "module_id": {"type": "string", "minLength": 1},
-          "co_id": {"type": "string", "minLength": 1},
           "difficulty": {"type": "string", "enum": ["easy", "medium", "hard"]},
           "count": {"type": "integer", "minimum": 1, "maximum": 20}
         },
-        "required": ["module_id", "co_id", "difficulty", "count"],
+        "required": ["module_id", "difficulty", "count"],
         "additionalProperties": false
       }
     },

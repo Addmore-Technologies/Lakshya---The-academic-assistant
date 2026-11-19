@@ -1,3 +1,4 @@
+from .routers import bulk_students
 from .routers import co_extraction
 
 import sys
@@ -115,3 +116,5 @@ app.add_event_handler(
 )
 
 app.include_router(co_extraction.router)
+
+app.include_router(bulk_students.router)

@@ -467,8 +467,13 @@ class AgentLoop:
                         else:
                             assert tool.handler is not None
                             tool_result = tool.handler(arguments, current_user)
-                            status = "draft_review" if tool.review_required else "ok"
-                            drafts.extend(self._extract_drafts(tool_result) if tool.review_required else [])
+                            if isinstance(tool_result, Mapping) and tool_result.get("error"):
+                                status = "error"
+                            elif tool.review_required:
+                                status = "draft_review"
+                                drafts.extend(self._extract_drafts(tool_result))
+                            else:
+                                status = "ok"
                         self._record(self.tool_usage_recorder, {
                             "tool_name": tool.name,
                             "role": role,
@@ -616,7 +621,8 @@ def system_prompt_for_role(role: str) -> str:
         return shared + (
             " Faculty tools may access only data for subjects owned by the authenticated faculty user. "
             "When faculty explicitly request quiz generation and authorize saving drafts, "
-            "call the generate_quiz tool with the specified module_id, co_id, difficulty, and count. "
+            "call the generate_quiz tool with the specified module_id, difficulty, and count. "
+            "Do not ask for a Course Outcome; it is determined separately for each draft. "
             "Do not merely describe a tool call when an authorized action can be performed. "
             "The generate_quiz tool immediately saves draft questions; it is not a confirmation proposal. "
             "If faculty request a preview or say not to save or execute, do not call generate_quiz. "

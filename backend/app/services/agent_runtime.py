@@ -28,8 +28,8 @@ def build_agent_tool_registry(
 ):
     """Bind only implemented, server-authorized tools to the shared contracts.
 
-    The quiz handler verifies faculty ownership of both the module and CO before
-    generation and persists every question as an AI draft.
+    The quiz handler verifies faculty ownership of the module, loads its subject's
+    COs and persists every generated question as an AI draft.
 
     The analytics tools take an AnalyticsStore, not a database connection. They are
     bound only when ``analytics_store_factory(connection)`` returns a store. Without

@@ -109,63 +109,124 @@ def test_tagging_retries_bad_json_once_then_leaves_chunk_untagged():
     assert all(entry["error"] for entry in usage)
 
 
-def test_quiz_generation_returns_unapproved_ai_drafts_for_requested_co():
-    client = FakeClient([json.dumps({"questions": [{
-        "stem": "Which algorithm sorts in O(n log n)?",
-        "options": ["Merge sort", "Linear search", "BFS", "Hash lookup"],
-        "correct_option": 0,
-        "co_number": 2,
-        "explanation": "Merge sort has O(n log n) time.",
-        "difficulty": "medium",
-    }]})])
+SLIDE_MODULE = {"id": "module-1", "title": "Algorithms", "slides": [
+    {"slide_number": 3, "text": "Merge sort is a stable sorting algorithm."},
+    {"slide_number": 8, "text": "Binary search requires sorted input."},
+]}
+OUTCOMES = [
+    {"id": "co-2", "number": 2, "description": "Analyze sorting algorithms"},
+    {"id": "co-4", "number": 4, "description": "Apply binary search"},
+    {"id": "co-5", "number": 5, "description": "Build automata"},
+]
+SORT_QUESTION = {
+    "stem": "Which sorting algorithm is stable?",
+    "options": ["Merge sort", "Quick sort", "Heap sort", "Selection sort"],
+    "correct_option": 0, "co_number": 2, "co_confidence": 0.95,
+    "source_slide_number": 3, "source_quote": "Merge sort is a stable sorting algorithm.",
+}
+SEARCH_QUESTION = {
+    "stem": "What does binary search require?",
+    "options": ["A linked list", "Sorted input", "A queue", "A hash table"],
+    "correct_option": 1, "co_number": 4, "co_confidence": 0.97,
+    "source_slide_number": 8, "source_quote": "Binary search requires sorted input.",
+}
 
-    result = generate_quiz(
-        {"id": "module-1", "title": "Algorithms"},
-        {"id": "co-2", "number": 2, "description": "Analyze algorithms"},
-        "medium",
-        1,
-        client,
-        model="super-test",
-    )
 
-    assert len(result) == 1
-    assert result[0]["module_id"] == "module-1"
-    assert result[0]["co_id"] == "co-2"
-    assert result[0]["co_number"] == 2
-    assert result[0]["status"] == "draft"
-    assert result[0]["source"] == "AI"
-    assert result[0]["correct_option"] == 0
+def generate(questions, *, module=SLIDE_MODULE, outcomes=OUTCOMES):
+    client = FakeClient([json.dumps({"questions": questions})])
+    drafts = generate_quiz(module, course_outcomes=outcomes, difficulty="medium",
+                           count=len(questions), client=client, model="super-test")
+    return drafts, json.loads(client.calls[0]["messages"][-1]["content"])
+
+
+def test_quiz_generation_maps_each_draft_using_all_candidate_definitions():
+    drafts, prompt = generate([SORT_QUESTION, SEARCH_QUESTION])
+    assert prompt["module"] == SLIDE_MODULE
+    assert [(co["number"], co["description"]) for co in prompt["course_outcomes"]] == [
+        (co["number"], co["description"]) for co in OUTCOMES
+    ]
+    assert [(d["co_id"], d["co_number"]) for d in drafts] == [("co-2", 2), ("co-4", 4)]
+    for draft, question in zip(drafts, [SORT_QUESTION, SEARCH_QUESTION]):
+        assert (draft["status"], draft["source"], draft["module_id"]) == ("draft", "AI", "module-1")
+        assert draft["correct_option"] == question["correct_option"]
+        assert draft["source_quote"] == question["source_quote"]
+        assert draft["source_slide_number"] == question["source_slide_number"]
+
+
+@pytest.mark.parametrize("bad_evidence", [
+    {"source_slide_number": 1}, {"source_slide_number": True}, {"source_slide_number": 3.0},
+    {"source_slide_number": 8}, {"source_quote": "Made-up quotation"},
+    {"source_quote": " "}, {"source_quote": None},
+    {"source_quote": "a stable sorting algorithm"},  # real quote, but omits the answer
+    {"stem": "Which planet orbits the sun?"},  # unrelated stem attached to a real quote
+])
+def test_ungrounded_question_fails_entire_batch(bad_evidence):
+    with pytest.raises(QuizGenerationError, match="Question 2.*evidence"):
+        generate([SEARCH_QUESTION, {**SORT_QUESTION, **bad_evidence}])
+
+
+def test_importers_can_use_the_same_evidence_gate_without_inference():
+    from ai.quiz_generation import validate_slide_evidence
+
+    slides = {3: SORT_QUESTION["source_quote"]}
+    validate_slide_evidence(SORT_QUESTION, 1, slides, SORT_QUESTION["stem"], "Merge sort")
+    with pytest.raises(QuizGenerationError, match="Question 2.*evidence"):
+        validate_slide_evidence(SORT_QUESTION, 2, slides, SORT_QUESTION["stem"], "Quick sort")
+
+
+@pytest.mark.parametrize("proposal", [
+    {"co_number": None}, {"co_number": 99}, {"co_number": True}, {"co_number": 2.0},
+    {"co_number": []}, {"co_number": 5},  # a real candidate, unrelated to the evidence
+    {"co_confidence": 0.79}, {"co_confidence": True}, {"co_confidence": 1.1},
+    {"co_confidence": None}, {"co_confidence": "high"},
+])
+def test_uncertain_or_unsupported_proposal_abstains_without_discarding_question(proposal):
+    drafts, _ = generate([{**SORT_QUESTION, **proposal, "co_id": "untrusted"}])
+    assert (drafts[0]["co_id"], drafts[0]["co_number"], drafts[0]["status"]) == (None, None, "draft")
+
+
+def test_no_candidate_outcomes_still_allows_grounded_drafts():
+    drafts, _ = generate([SORT_QUESTION], outcomes=[])
+    assert (drafts[0]["co_id"], drafts[0]["co_number"]) == (None, None)
+
+
+def test_shared_topic_alone_does_not_justify_a_specific_outcome():
+    outcomes = [
+        {"id": "co-1", "number": 1, "description": "Analyze sorting stability"},
+        {"id": "co-2", "number": 2, "description": "Evaluate sorting complexity"},
+    ]
+    # The model proposes complexity, but its only evidence for that CO is
+    # 'sorting', which fits the competing definition equally well.
+    drafts, _ = generate([SORT_QUESTION], outcomes=outcomes)
+    assert drafts[0]["co_id"] is None
+
+
+@pytest.mark.parametrize("overrides", [
+    {"module": {**SLIDE_MODULE, "slides": []}},
+    {"module": {**SLIDE_MODULE, "slides": [SLIDE_MODULE["slides"][0]] * 2}},
+    {"module": {**SLIDE_MODULE, "slides": [{"slide_number": True, "text": "Some text"}]}},
+    {"module": {**SLIDE_MODULE, "slides": [{"slide_number": 1, "text": "  "}]}},
+    {"course_outcomes": OUTCOMES[0]}, {"course_outcomes": [OUTCOMES[0], dict(OUTCOMES[0], id="c")]},
+    {"course_outcomes": [dict(OUTCOMES[0], id="")]}, {"course_outcomes": [dict(OUTCOMES[0], number=True)]},
+    {"count": 21}, {"count": True}, {"difficulty": "unsupported"},
+])
+def test_invalid_context_is_rejected_before_calling_model(overrides):
+    client = FakeClient([])
+    args = dict(module=SLIDE_MODULE, course_outcomes=OUTCOMES, count=1, difficulty="medium")
+    with pytest.raises(ValueError):
+        generate_quiz(**{**args, **overrides}, client=client, model="test")
+    assert not client.calls
 
 
 def test_quiz_generation_rejects_duplicate_stems():
-    question = {
-        "stem": "Same stem?", "options": ["A", "B", "C", "D"],
-        "correct_option": 1, "co_number": 2,
-    }
-    client = FakeClient([json.dumps({"questions": [question, question]})])
-
     with pytest.raises(QuizGenerationError, match="duplicate"):
-        generate_quiz(
-            {"id": "module-1"}, {"id": "co-2", "number": 2}, "easy", 2,
-            client, model="super-test",
-        )
+        generate([SORT_QUESTION, SORT_QUESTION])
 
 
 @pytest.mark.parametrize("reported_difficulty", ["hard", ["medium"], {"level": "medium"}])
 def test_quiz_generation_rejects_invalid_or_mismatched_difficulty(reported_difficulty):
-    client = FakeClient([json.dumps({"questions": [{
-        "stem": "What is a stable sorting algorithm?",
-        "options": ["Merge sort", "Quick sort", "Heap sort", "Selection sort"],
-        "correct_option": 0,
-        "co_number": 2,
-        "difficulty": reported_difficulty,
-    }]})])
-
     with pytest.raises(QuizGenerationError, match="difficulty"):
-        generate_quiz(
-            {"id": "module-1"}, {"id": "co-2", "number": 2}, "medium", 1,
-            client, model="super-test",
-        )
+        generate([{**SORT_QUESTION, "difficulty": reported_difficulty}])
 
 
 def test_token_factory_client_rejects_non_object_message():
@@ -192,5 +253,11 @@ def test_quiz_schema_matches_runtime_marks_and_option_validation():
     schema = json.loads(schema_path.read_text(encoding="utf-8"))
     question = schema["properties"]["questions"]["items"]["properties"]
 
+    required = set(schema["properties"]["questions"]["items"]["required"])
+    assert {"co_number", "co_confidence", "source_slide_number", "source_quote"} <= required
+    assert question["co_number"]["type"] == ["integer", "null"]
+    assert question["source_slide_number"] == {"type": "integer", "minimum": 1}
+    assert question["source_quote"]["minLength"] == 1
+    assert (question["co_confidence"]["minimum"], question["co_confidence"]["maximum"]) == (0, 1)
     assert question["marks"]["type"] == "number"
     assert question["options"]["uniqueItems"] is True

@@ -132,7 +132,7 @@ def evaluate_tagging(
 
 def evaluate_quiz_generation(
     module: Mapping[str, Any],
-    co: Mapping[str, Any],
+    course_outcomes: list[Mapping[str, Any]],
     difficulty: str,
     count: int,
     client: Any,
@@ -143,7 +143,7 @@ def evaluate_quiz_generation(
     """Generate structurally checked drafts for a faculty member to read."""
     drafts = generate_quiz(
         module,
-        co,
+        course_outcomes,
         difficulty,
         count,
         client,
@@ -153,7 +153,7 @@ def evaluate_quiz_generation(
     return {
         "task": "quiz_generation",
         "model": model,
-        "requested_co": co.get("number", co.get("co_number")),
+        "course_outcomes": course_outcomes,
         "requested_difficulty": difficulty,
         "drafts": drafts,
         "manual_review_required": [

@@ -2,7 +2,7 @@
 
 Examples:
   python -m ai.evaluate_models tagging --decks deck1.pptx deck2.pptx --cos-file cos.json
-  python -m ai.evaluate_models quiz --module-json module.json --co-json co.json --difficulty medium --count 5
+  python -m ai.evaluate_models quiz --module-json module.json --cos-file cos.json --difficulty medium --count 5
   python -m ai.evaluate_models tool-calling
 
 The CLI reads credentials from the project .env/process environment and writes
@@ -52,8 +52,8 @@ def _parser() -> argparse.ArgumentParser:
     tagging.add_argument("--output", help="Optional JSON report path")
 
     quiz = commands.add_parser("quiz", help="Generate structurally validated quiz drafts for faculty review")
-    quiz.add_argument("--module-json", required=True, help="JSON object with id/title/description")
-    quiz.add_argument("--co-json", required=True, help="JSON object with id/number/description")
+    quiz.add_argument("--module-json", required=True, help="JSON object with id, title and numbered slides")
+    quiz.add_argument("--cos-file", required=True, help="JSON array of subject outcomes with id, number and description")
     quiz.add_argument("--difficulty", choices=["easy", "medium", "hard"], required=True)
     quiz.add_argument("--count", type=int, default=3)
     quiz.add_argument("--model", help="Candidate model ID; defaults to MODEL_GENERATION")
@@ -90,12 +90,12 @@ def main(argv: list[str] | None = None) -> int:
             )
         elif args.task == "quiz":
             module = _read_json(args.module_json)
-            co = _read_json(args.co_json)
-            if not isinstance(module, dict) or not isinstance(co, dict):
-                raise ValueError("Module and CO JSON files must each contain an object")
+            course_outcomes = _read_json(args.cos_file)
+            if not isinstance(module, dict) or not isinstance(course_outcomes, list):
+                raise ValueError("Expected a module object and a course outcomes array")
             report = evaluate_quiz_generation(
                 module,
-                co,
+                course_outcomes,
                 args.difficulty,
                 args.count,
                 client,

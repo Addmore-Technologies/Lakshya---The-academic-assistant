@@ -49,10 +49,16 @@ report = process_module_upload(module_id, uploaded_file, cos, tagger, store)
 from ai.quiz_generation import generate_quiz
 
 questions = generate_quiz(
-    module={"id": module_id, "title": "Algorithms"},
-    co={"id": co_id, "number": 2, "description": "Analyze algorithms"},
+    module={"id": module_id, "title": "Algorithms", "slides": [
+        {"slide_number": 3, "text": "Binary search requires sorted input."},
+        {"slide_number": 7, "text": "Merge sort is a stable sorting algorithm."},
+    ]},
+    course_outcomes=[
+        {"id": search_co_id, "number": 1, "description": "Apply binary search"},
+        {"id": sort_co_id, "number": 2, "description": "Analyze sorting algorithms"},
+    ],
     difficulty="medium",
-    count=5,
+    count=2,
     client=client,
     model=os.environ["MODEL_GENERATION"],
     usage_recorder=record_model_usage,
@@ -61,7 +67,9 @@ questions = generate_quiz(
 # They are never approved or published by the AI function.
 ```
 
-The function raises `QuizGenerationError` if the response is malformed, the count is wrong, options are invalid, a question is tagged to the wrong CO, or stems/options repeat. Faculty approval remains a separate action.
+Pass all of the subject’s COs, not just previously tagged outcomes. Each question cites a `source_slide_number` and `source_quote`. The generator checks that the passage occurs on that slide (ignoring whitespace differences), contains the correct option, and shares topic words with the stem. Invalid evidence rejects the **whole batch** with `QuizGenerationError`.
+
+A grounded question may still lack a defensible CO. The model proposes a CO number; the generator resolves its ID only when confidence is at least 0.8 and the question and citation share topic words with that definition. If there are no such words, or another CO matches all of them too, `co_number` and `co_id` stay `None`. An empty outcome list is valid. These checks establish provenance, not semantic correctness: faculty review the question and its mapping before approval.
 
 ## Q&A, study plan, flashcards, and notes adapters
 
@@ -81,7 +89,7 @@ After setting the Token Factory values in the local `.env`, run the manual evalu
 
 ```bash
 python -m ai.evaluate_models tagging --decks deck-a.pptx deck-b.pptx --cos-file cos.json --repeats 3 --output notes/tagging-eval.json
-python -m ai.evaluate_models quiz --module-json module.json --co-json co.json --difficulty medium --count 5 --output notes/quiz-eval.json
+python -m ai.evaluate_models quiz --module-json module.json --cos-file cos.json --difficulty medium --count 5 --output notes/quiz-eval.json
 python -m ai.evaluate_models tool-calling --model YOUR_SUPER_MODEL_ID --output notes/tool-eval.json
 ```
 
